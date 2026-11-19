@@ -38,7 +38,15 @@ static int s_checks   = 0;
 #define SEQ_T2  IDN_INEV_SEQ_DUPLICATE
 #define SEQ_T3  IDN_INEV_SEQ_MISSING
 
+#define N(a) (sizeof(a) / sizeof((a)[0]))
+
 /* -- Sequence -------------------------------------------------------------- */
+
+/* After a forward jump over `skipped` numbers, those already outside the window count as missing at once;
+   the rest count when they leave it. */
+#define MISSING_NOW(skipped)    ((skipped) - (IDN_SEQ_WINDOW - 1u))
+/* Enough consecutive numbers to push every earlier hole out of the window. */
+#define FLUSH                   (2u * IDN_SEQ_WINDOW)
 
 typedef struct {
     uint16_t        seq;
@@ -47,6 +55,8 @@ typedef struct {
     uint16_t        events;
     uint32_t        missing;
 } seq_step_t;
+
+#define RUN_SEQ(name, steps) run_seq_case(name, steps, N(steps))
 
 static void run_seq_case(const char *name, const seq_step_t *steps, size_t n)
 {
@@ -85,7 +95,7 @@ static void test_seq(void)
         { 0,     IDN_SEQ_NEXT,  true, 0, 0 },
         { 1,     IDN_SEQ_NEXT,  true, 0, 0 },
     };
-    run_seq_case("wrap 65535 -> 0", wrap, sizeof(wrap) / sizeof(wrap[0]));
+    RUN_SEQ("wrap 65535 -> 0", wrap);
 
     static const seq_step_t dup[] = {
         { 10, IDN_SEQ_FIRST,     true,  0,               0 },
@@ -94,7 +104,7 @@ static void test_seq(void)
         { 12, IDN_SEQ_NEXT,      true,  0,               0 },
         { 10, IDN_SEQ_DUPLICATE, false, SEQ_T1 | SEQ_T2, 0 },
     };
-    run_seq_case("duplicate", dup, sizeof(dup) / sizeof(dup[0]));
+    RUN_SEQ("duplicate", dup);
 
     static const seq_step_t gap_late[] = {
         { 100, IDN_SEQ_FIRST,     true,  0,               0 },
@@ -104,7 +114,7 @@ static void test_seq(void)
         { 103, IDN_SEQ_DUPLICATE, false, SEQ_T1 | SEQ_T2, 0 },
         { 106, IDN_SEQ_NEXT,      true,  0,               0 },
     };
-    run_seq_case("gap then delayed old packet", gap_late, sizeof(gap_late) / sizeof(gap_late[0]));
+    RUN_SEQ("gap then delayed old packet", gap_late);
 
     /* The holes 102 and 104 are lost; 103 arrived late and is not counted. */
     {
@@ -115,7 +125,7 @@ static void test_seq(void)
         missing += idn_seq_observe(&t, 101).missing;
         missing += idn_seq_observe(&t, 105).missing;
         missing += idn_seq_observe(&t, 103).missing;
-        missing += seq_feed_range(&t, 106, 40);
+        missing += seq_feed_range(&t, 106, FLUSH);
         CHECK_EQ(missing, 2);
     }
 
@@ -127,7 +137,7 @@ static void test_seq(void)
         idn_seq_result_t r = idn_seq_observe(&t, 2);
         CHECK_EQ(r.cls, IDN_SEQ_GAP);
         CHECK_EQ(r.missing, 0);
-        uint32_t missing = seq_feed_range(&t, 3, 40);
+        uint32_t missing = seq_feed_range(&t, 3, FLUSH);
         CHECK_EQ(missing, 7);
     }
 
@@ -138,18 +148,18 @@ static void test_seq(void)
         idn_seq_observe(&t, 0);
         idn_seq_result_t r = idn_seq_observe(&t, 1000);
         CHECK_EQ(r.cls, IDN_SEQ_GAP);
-        CHECK_EQ(r.missing, 968);
+        CHECK_EQ(r.missing, MISSING_NOW(999));
         CHECK_EQ(r.input_events, SEQ_T1 | SEQ_T3);
-        uint32_t missing = r.missing + seq_feed_range(&t, 1001, 40);
+        uint32_t missing = r.missing + seq_feed_range(&t, 1001, FLUSH);
         CHECK_EQ(missing, 999);
     }
 
     static const seq_step_t half_range[] = {
         { 0,      IDN_SEQ_FIRST, true,  0,      0 },
         { 0x8000, IDN_SEQ_STALE, false, SEQ_T1, 0 },
-        { 0x7FFF, IDN_SEQ_GAP,   true,  SEQ_T1 | SEQ_T3, 0x7FFE - 31 },
+        { 0x7FFF, IDN_SEQ_GAP,   true,  SEQ_T1 | SEQ_T3, MISSING_NOW(0x7FFE) },
     };
-    run_seq_case("half-range ambiguity", half_range, sizeof(half_range) / sizeof(half_range[0]));
+    RUN_SEQ("half-range ambiguity", half_range);
 
     static const seq_step_t stale_resync[] = {
         { 1000, IDN_SEQ_FIRST,  true,  0,      0 },
@@ -159,9 +169,9 @@ static void test_seq(void)
         { 502,  IDN_SEQ_STALE,  false, SEQ_T1, 0 },
         { 503,  IDN_SEQ_RESYNC, true,  SEQ_T1, 0 },
         { 504,  IDN_SEQ_NEXT,   true,  0,      0 },
-        { 1002, IDN_SEQ_GAP,    true,  SEQ_T1 | SEQ_T3, 497 - 31 },
+        { 1002, IDN_SEQ_GAP,    true,  SEQ_T1 | SEQ_T3, MISSING_NOW(497) },
     };
-    run_seq_case("stale run resyncs", stale_resync, sizeof(stale_resync) / sizeof(stale_resync[0]));
+    RUN_SEQ("stale run resyncs", stale_resync);
 
     static const seq_step_t stale_scattered[] = {
         { 1000, IDN_SEQ_FIRST, true,  0,      0 },
@@ -172,20 +182,29 @@ static void test_seq(void)
         { 702,  IDN_SEQ_STALE, false, SEQ_T1, 0 },
         { 703,  IDN_SEQ_STALE, false, SEQ_T1, 0 },
     };
-    run_seq_case("scattered stale does not resync", stale_scattered,
-                 sizeof(stale_scattered) / sizeof(stale_scattered[0]));
+    RUN_SEQ("scattered stale does not resync", stale_scattered);
 
     static const seq_step_t outside_window[] = {
         { 100, IDN_SEQ_FIRST, true,  0,      0 },
         { 99,  IDN_SEQ_STALE, false, SEQ_T1, 0 },   /* before the baseline */
-        { 200, IDN_SEQ_GAP,   true,  SEQ_T1 | SEQ_T3, 99 - 31 },
-        { 168, IDN_SEQ_STALE, false, SEQ_T1, 0 },   /* 32 back: outside the window */
-        { 169, IDN_SEQ_LATE,  false, SEQ_T1, 0 },   /* 31 back: inside */
+        { 200, IDN_SEQ_GAP,   true,  SEQ_T1 | SEQ_T3, MISSING_NOW(99) },
+        { 200 - IDN_SEQ_WINDOW,      IDN_SEQ_STALE, false, SEQ_T1, 0 },   /* just outside the window */
+        { 200 - IDN_SEQ_WINDOW + 1u, IDN_SEQ_LATE,  false, SEQ_T1, 0 },   /* oldest number inside it */
     };
-    run_seq_case("window edges", outside_window, sizeof(outside_window) / sizeof(outside_window[0]));
+    RUN_SEQ("window edges", outside_window);
 }
 
 /* -- Chronology ------------------------------------------------------------ */
+
+/* A chronology whose first accepted message is at wire_us; returns its unwrapped time. */
+static uint64_t chrono_start(idn_chronology_t *c, uint32_t wire_us)
+{
+    uint64_t u = 0;
+    idn_chronology_reset(c);
+    idn_chronology_check(c, wire_us, &u);
+    idn_chronology_commit(c, u);
+    return u;
+}
 
 static void test_chronology(void)
 {
@@ -200,9 +219,7 @@ static void test_chronology(void)
     idn_chronology_commit(&c, u1);
 
     /* Equal timestamps (e.g. Void messages) are legal chronology. */
-    idn_chronology_reset(&c);
-    CHECK_EQ(idn_chronology_check(&c, 5000, &u0), IDN_TS_FIRST);
-    idn_chronology_commit(&c, u0);
+    u0 = chrono_start(&c, 5000);
     CHECK_EQ(idn_chronology_check(&c, 5000, &u1), IDN_TS_EQUAL);
     idn_chronology_commit(&c, u1);
     CHECK_EQ(idn_chronology_check(&c, 5000, &u1), IDN_TS_EQUAL);
@@ -215,29 +232,25 @@ static void test_chronology(void)
     CHECK_EQ(u1 - u0, 1);
 
     /* Half-range assumption. */
-    idn_chronology_reset(&c);
-    idn_chronology_check(&c, 0, &u0);
-    idn_chronology_commit(&c, u0);
+    chrono_start(&c, 0);
     CHECK_EQ(idn_chronology_check(&c, 0x7FFFFFFFu, &u1), IDN_TS_FORWARD);
     CHECK_EQ(idn_chronology_check(&c, 0x80000000u, &u1), IDN_TS_BEFORE);
 
-    /* Restarted sender clock: 8 earlier, non-decreasing messages re-base. */
-    idn_chronology_reset(&c);
-    idn_chronology_check(&c, 5000000, &u0);
-    idn_chronology_commit(&c, u0);
-    for (uint32_t k = 1; k <= 8; k++) {
+    /* Restarted sender clock: a run of earlier, non-decreasing messages re-bases
+       the timeline on the message that completes the run. */
+    chrono_start(&c, 5000000);
+    for (uint32_t k = 1; k <= IDN_TS_RESYNC_RUN; k++) {
         CHECK_EQ(idn_chronology_check(&c, 100 * k, &u1), IDN_TS_BEFORE);
-        bool resync = idn_chronology_before(&c, 100 * k, &u1);
-        CHECK_EQ(resync, k == 8);
+        CHECK_EQ(idn_chronology_before(&c, 100 * k, &u0), k == IDN_TS_RESYNC_RUN);
     }
-    CHECK_EQ(u1, 0x100000320ull);
-    CHECK_EQ(idn_chronology_check(&c, 900, &u1), IDN_TS_FORWARD);
-    CHECK_EQ(u1, 0x100000384ull);
+    CHECK_EQ(idn_chronology_check(&c, 100 * IDN_TS_RESYNC_RUN + 100, &u1), IDN_TS_FORWARD);
+    CHECK_EQ(u1 - u0, 100);
+    /* 1 ms before it, across the wire wrap, is still earlier. */
+    CHECK_EQ(idn_chronology_check(&c, 100 * IDN_TS_RESYNC_RUN - 1000u, &u1), IDN_TS_BEFORE);
+    CHECK_EQ(u0 - u1, 1000);
 
     /* Scattered earlier messages never re-base; an accepted one restarts the count. */
-    idn_chronology_reset(&c);
-    idn_chronology_check(&c, 5000000, &u0);
-    idn_chronology_commit(&c, u0);
+    chrono_start(&c, 5000000);
     {
         bool any = false;
         for (uint32_t k = 0; k < 20; k++) {
@@ -247,11 +260,11 @@ static void test_chronology(void)
         CHECK(!any);
         idn_chronology_check(&c, 5000001, &u1);
         idn_chronology_commit(&c, u1);
-        for (uint32_t k = 1; k <= 7; k++)
+        for (uint32_t k = 1; k < IDN_TS_RESYNC_RUN; k++)
             any |= idn_chronology_before(&c, 1000 + k, &u1);
         idn_chronology_check(&c, 5000002, &u1);
         idn_chronology_commit(&c, u1);
-        any |= idn_chronology_before(&c, 1008, &u1);
+        any |= idn_chronology_before(&c, 1000 + IDN_TS_RESYNC_RUN, &u1);
         CHECK(!any);
     }
 
@@ -275,10 +288,8 @@ static void test_wave(void)
     uint64_t ts;
 
     /* 0xFFFFFFF0 + 32 continues at 0x10. */
-    idn_chronology_reset(&c);
+    ts = chrono_start(&c, 0xFFFFFFF0u);
     idn_wave_reset(&w);
-    idn_chronology_check(&c, 0xFFFFFFF0u, &ts);
-    idn_chronology_commit(&c, ts);
     CHECK_EQ(idn_wave_check(&w, ts), IDN_WAVE_START);
     idn_wave_commit(&w, ts, 32);
     CHECK_EQ(idn_chronology_check(&c, 0x10u, &ts), IDN_TS_FORWARD);
@@ -352,6 +363,21 @@ static idn_rate_verdict_t feed_cumulative(idn_rate_epoch_t *e, const idn_rate_po
     return IDN_RATE_OK;
 }
 
+/* Feed `chunks` chunks of n samples whose durations alternate d0, d1, committing each.
+   Returns the first non-OK verdict, or OK. */
+static idn_rate_verdict_t feed_fixed(idn_rate_epoch_t *e, const idn_rate_policy_t *p, uint32_t n,
+                                     uint32_t d0, uint32_t d1, uint32_t chunks)
+{
+    idn_rate_verdict_t first_bad = IDN_RATE_OK;
+    for (uint32_t k = 0; k < chunks; k++) {
+        uint32_t d = (k & 1u) ? d1 : d0;
+        idn_rate_verdict_t v = idn_rate_check(p, e, n, d, 0);
+        if (v != IDN_RATE_OK && first_bad == IDN_RATE_OK) first_bad = v;
+        idn_rate_commit(e, n, d);
+    }
+    return first_bad;
+}
+
 static void test_rate(void)
 {
     idn_rate_epoch_t e;
@@ -381,39 +407,20 @@ static void test_rate(void)
 
     /* Strict 2133/2134 alternation (29,997.7 pps) at a 30k limit. */
     idn_rate_reset(&e);
-    {
-        idn_rate_verdict_t first_bad = IDN_RATE_OK;
-        for (uint32_t k = 0; k < 20000; k++) {
-            uint32_t d = (k & 1u) ? 2134u : 2133u;
-            idn_rate_verdict_t v = idn_rate_check(&POLICY_30K, &e, 64, d, 0);
-            if (v != IDN_RATE_OK && first_bad == IDN_RATE_OK) first_bad = v;
-            idn_rate_commit(&e, 64, d);
-        }
-        CHECK_EQ(first_bad, IDN_RATE_OK);
-        CHECK_EQ(idn_rate_select(&POLICY_30K, &e), 29998);
-        /* Locked at 30,000 after the prebuffer: both durations still fit. */
-        CHECK_EQ(idn_rate_check(&POLICY_30K, &e, 64, 2133, 30000), IDN_RATE_OK);
-        CHECK_EQ(idn_rate_check(&POLICY_30K, &e, 64, 2134, 30000), IDN_RATE_OK);
-    }
+    CHECK_EQ(feed_fixed(&e, &POLICY_30K, 64, 2133, 2134, 20000), IDN_RATE_OK);
+    CHECK_EQ(idn_rate_select(&POLICY_30K, &e), 29998);
+    /* Locked at 30,000 after the prebuffer: both durations still fit. */
+    CHECK_EQ(idn_rate_check(&POLICY_30K, &e, 64, 2133, 30000), IDN_RATE_OK);
+    CHECK_EQ(idn_rate_check(&POLICY_30K, &e, 64, 2134, 30000), IDN_RATE_OK);
 
     /* Constant 2133 us per 64 samples (30,004.7 pps, a sender rounding each
        chunk on its own) is inside the per-chunk quantization envelope of
        30 kpps: accepted, and played at the limit, never above it. */
     idn_rate_reset(&e);
-    {
-        idn_rate_verdict_t first_bad = IDN_RATE_OK;
-        for (uint32_t k = 0; k < 20000; k++) {
-            idn_rate_verdict_t v = idn_rate_check(&POLICY_30K, &e, 64, 2133, 0);
-            if (v != IDN_RATE_OK && first_bad == IDN_RATE_OK) first_bad = v;
-            idn_rate_commit(&e, 64, 2133);
-        }
-        CHECK_EQ(first_bad, IDN_RATE_OK);
-        CHECK_EQ(idn_rate_select(&POLICY_30K, &e), 30000);
-    }
+    CHECK_EQ(feed_fixed(&e, &POLICY_30K, 64, 2133, 2133, 20000), IDN_RATE_OK);
+    CHECK_EQ(idn_rate_select(&POLICY_30K, &e), 30000);
     idn_rate_reset(&e);
-    idn_rate_commit(&e, 64, 2133);
-    idn_rate_commit(&e, 64, 2133);
-    idn_rate_commit(&e, 64, 2133);
+    CHECK_EQ(feed_fixed(&e, &POLICY_30K, 64, 2133, 2133, 3), IDN_RATE_OK);
     CHECK_EQ(idn_rate_requested_mhz(&e), 30004688);
     CHECK_EQ(idn_rate_select(&POLICY_30K, &e), 30000);
 
@@ -433,7 +440,7 @@ static void test_rate(void)
     bad = 0;
     CHECK_EQ(feed_cumulative(&e, &POLICY_30K, 64, 30100, 100, &bad), IDN_RATE_ABOVE_LIMIT);
     CHECK_EQ(bad, 1);
-    CHECK_EQ(e.samples, 0);
+    CHECK_EQ(idn_rate_requested_mhz(&e), 0);   /* nothing committed */
 
     /* Genuine 50,000 pps: rejected, nothing committed. */
     idn_rate_reset(&e);

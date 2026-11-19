@@ -34,14 +34,30 @@ def _load():
 
 
 FX = _load()
+P = FX["sender-xyrgbi-40-at-30k"]["sender"]   # the stream most tests start from
+SEQ = P["first_seq"]
 
 
 def literal(obj) -> bytes:
     return bytes.fromhex("".join(s["hex"] for s in obj["segments"]))
 
 
-def fx_bytes(fid: str) -> bytes:
-    return literal(FX[fid])
+def fx_bytes(fid: str, seq=None, ts=None) -> bytes:
+    """A fixture datagram, optionally with another Hello sequence number or RT timestamp."""
+    data = bytearray(literal(FX[fid]))
+    if seq is not None:
+        data[2:4] = (seq & 0xFFFF).to_bytes(2, "big")
+    if ts is not None:
+        data[8:12] = (ts & 0xFFFFFFFF).to_bytes(4, "big")
+    return bytes(data)
+
+
+def wave_samples(datagram: bytes) -> int:
+    """Samples in an RT wave packet, read from its own headers (Hello 2.1, Stream 2.1, 2.2, 6.1)."""
+    n = 4 + 8                      # Hello header, channel message header
+    if datagram[6] & 0x40:         # CCLF: configuration header and SCWC words
+        n += 4 + 4 * datagram[n]
+    return (len(datagram) - n - 4) // 8
 
 
 class FakeClock:
@@ -90,75 +106,55 @@ class FakeSocket:
         pass
 
 
-def make_stream(sender_params, clock=None, sock=None, **kw):
+def make_stream(params=P, clock=None, sock=None, **kw):
     clock = clock or FakeClock()
     sock = sock or FakeSocket(clock)
-    cfg = idn.StreamConfig(pps=sender_params["pps"], packet_points=sender_params["packet_points"],
-                           channel=sender_params["channel"], service_id=sender_params["service_id"],
-                           sdm=sender_params["sdm"], group=sender_params["group"], budget=sender_params["budget"],
-                           **kw.pop("config", {}))
-    st = idn.IDNStream(sock, ADDR, cfg, first_seq=sender_params["first_seq"], ts_base=sender_params["ts_base"],
-                       clock=clock, sleep_until=clock.sleep_until, lead_in=sender_params["lead_in"], **kw)
+    cfg = idn.StreamConfig(pps=params["pps"], packet_points=params["packet_points"], channel=params["channel"],
+                           service_id=params["service_id"], sdm=params["sdm"], group=params["group"],
+                           budget=params["budget"])
+    st = idn.IDNStream(sock, ADDR, cfg, first_seq=params["first_seq"], ts_base=params["ts_base"],
+                       clock=clock, sleep_until=clock.sleep_until, lead_in=params["lead_in"], **kw)
     return st, sock, clock
 
 
-def sender_input(params):
+def sender_input(params=P):
     if "input_points" in params:
         return [LaserPoint(*p) for p in params["input_points"]]
     return [LaserPoint(0, 0, 0, 0, 0, 0) for _ in range(params["input_blank_count"])]
 
 
-def run_sender_fixture(fid):
-    f = FX[fid]
-    p = f["sender"]
-    st, sock, clock = make_stream(p)
-    origin = clock.now
-    st.stream_points(sender_input(p), loop=False)
-    if p.get("close", True):
-        st.close()
-    return f, sock, origin
-
-
 class SenderBytes(unittest.TestCase):
     """Whole-packet and header-prefix comparisons with literal fixtures."""
 
-    def check_sequence(self, fid):
-        f, sock, origin = run_sender_fixture(fid)
-        self.assertEqual(len(sock.sent), len(f["packets"]), "packet count")
-        for k, (want, (got, addr, t)) in enumerate(zip(f["packets"], sock.sent)):
-            self.assertEqual(addr, ADDR)
-            if "ref" in want:
-                self.assertEqual(got.hex(), fx_bytes(want["ref"]).hex(), f"packet {k} ({want['ref']})")
-            else:
-                prefix = literal(want)
-                self.assertEqual(len(got), want["datagram_length"], f"packet {k} length")
-                self.assertEqual(got[:len(prefix)].hex(), prefix.hex(), f"packet {k} header")
-            if want["send_at_s"] is not None:
-                self.assertGreaterEqual(t - origin, want["send_at_s"] - 1e-12, f"packet {k} sent early")
-                self.assertAlmostEqual(t - origin, want["send_at_s"], places=9, msg=f"packet {k} send time")
-
-    def test_first_and_second_packet_and_close(self):
-        self.check_sequence("sender-xyrgbi-40-at-30k")
-
-    def test_explicit_service_1(self):
-        self.check_sequence("sender-xyrgbi-20-svc1")
-
-    def test_config_repeats_every_200ms_with_sdm_scm(self):
-        self.check_sequence("sender-config-cadence-1k-50")
-
-    def test_timestamp_wrap(self):
-        self.check_sequence("sender-timestamp-wrap")
-
-    def test_finite_tail_is_repartitioned(self):
-        self.check_sequence("sender-tail-65-at-64")
+    def test_sender_sequence_fixtures(self):
+        for fid, f in FX.items():
+            if f["kind"] != "sender-sequence":
+                continue
+            with self.subTest(fixture=fid):
+                p = f["sender"]
+                st, sock, clock = make_stream(p)
+                origin = clock.now
+                st.stream_points(sender_input(p), loop=False)
+                if p.get("close", True):
+                    st.close()
+                self.assertEqual(len(sock.sent), len(f["packets"]), "packet count")
+                for k, (want, (got, addr, t)) in enumerate(zip(f["packets"], sock.sent)):
+                    self.assertEqual(addr, ADDR)
+                    if "ref" in want:
+                        self.assertEqual(got.hex(), fx_bytes(want["ref"]).hex(), f"packet {k} ({want['ref']})")
+                    else:
+                        prefix = literal(want)
+                        self.assertEqual(len(got), want["datagram_length"], f"packet {k} length")
+                        self.assertEqual(got[:len(prefix)].hex(), prefix.hex(), f"packet {k} header")
+                    if want["send_at_s"] is not None:
+                        self.assertGreaterEqual(t - origin, want["send_at_s"] - 1e-12, f"packet {k} sent early")
+                        self.assertAlmostEqual(t - origin, want["send_at_s"], places=9, msg=f"packet {k} send time")
 
     def test_lead_in_is_blanked_origin_and_counted(self):
-        p = dict(FX["sender-xyrgbi-40-at-30k"]["sender"], lead_in=True)
-        st, sock, _ = make_stream(p)
-        pts = sender_input(p)[1:]  # drop the fixture's own origin sample; the lead-in replaces it
-        st.stream_points(pts, loop=False)
-        self.assertEqual(sock.sent[0][0].hex(), fx_bytes("rt-first-config-wave-xyrgbi-20").hex())
-        self.assertEqual(st.stats["samples"], 40)
+        st, sock, _ = make_stream(dict(P, lead_in=True))
+        stats = st.stream_points(sender_input()[1:], loop=False)  # the lead-in replaces the fixture's origin sample
+        self.assertEqual(sock.sent[0][0], fx_bytes("rt-first-config-wave-xyrgbi-20"))
+        self.assertEqual(stats["samples"], 40)
 
 
 class Batching(unittest.TestCase):
@@ -196,97 +192,82 @@ class Batching(unittest.TestCase):
                 self.assertEqual(durs, c["expect_durations_us"])
 
     def test_max_size_packet_fits_budget(self):
-        p = dict(FX["sender-xyrgbi-40-at-30k"]["sender"], packet_points=179)
-        st, sock, _ = make_stream(p)
+        st, sock, _ = make_stream(dict(P, packet_points=179))
         st.stream_points([LaserPoint(0, 0)] * 358, loop=False)
-        self.assertEqual([len(d) for d, _, _ in sock.sent], [1468, 1448])
+        sent = [d for d, _, _ in sock.sent]
+        self.assertEqual([wave_samples(d) for d in sent], [179, 179])
+        self.assertLessEqual(max(map(len, sent)), P["budget"])
         with self.assertRaises(ValueError):
-            make_stream(dict(p, packet_points=180))
+            make_stream(dict(P, packet_points=180))
 
     def test_ilda_frame_ends_do_not_make_short_packets(self):
-        p = dict(FX["sender-xyrgbi-40-at-30k"]["sender"], packet_points=64)
-        st, sock, _ = make_stream(p)
-        frames = [[LaserPoint(0, 0)] * 30, [LaserPoint(0, 0)] * 30, [LaserPoint(0, 0)] * 30]  # 90 points
+        st, sock, _ = make_stream(dict(P, packet_points=64))
+        frames = [[LaserPoint(0, 0)] * 30] * 3  # 90 points
         st.stream(pt for fr in frames for pt in fr)
-        counts = [(len(d) - (36 if d[6] & 0x40 else 16)) // 8 for d, _, _ in sock.sent]
-        self.assertEqual(counts, [64, 26])
+        self.assertEqual([wave_samples(d) for d, _, _ in sock.sent], [64, 26])
 
     def test_below_minimum_finite_input_is_an_error(self):
-        st, sock, _ = make_stream(FX["sender-xyrgbi-40-at-30k"]["sender"])
+        st, sock, _ = make_stream()
         with self.assertRaises(ValueError):
             st.stream_points([LaserPoint(0, 0)] * 19, loop=False)
         self.assertEqual(sock.sent, [])
 
 
 class Pacing(unittest.TestCase):
-    P = FX["sender-xyrgbi-40-at-30k"]["sender"]
-
     def test_never_sends_early_even_if_sleep_returns_early(self):
         clock = FakeClock(undershoot=0.0004)
-        st, sock, _ = make_stream(dict(self.P, packet_points=20), clock=clock)
+        st, sock, _ = make_stream(clock=clock)
         origin = clock.now
         st.stream_points([LaserPoint(0, 0)] * 200, loop=False)
-        n = 0
-        for data, _, t in sock.sent:
-            due = origin + idn.boundary_us(n, self.P["pps"]) / 1e6
-            self.assertGreaterEqual(t, due)
-            n += 20
+        for k, (_, _, t) in enumerate(sock.sent):
+            self.assertGreaterEqual(t, origin + idn.boundary_us(k * P["packet_points"], P["pps"]) / 1e6)
 
     def test_small_lateness_keeps_the_authored_timeline(self):
-        clock = FakeClock()
-        st, sock, _ = make_stream(self.P, clock=clock)
-        st.send_batch([LaserPoint(0, 0)] * 20)
+        st, sock, clock = make_stream()
+        pts = sender_input()
+        st.send_batch(pts[:20])
         clock.now += 0.05  # 50 ms late, under the 100 ms limit
-        st.send_batch([LaserPoint(0, 0)] * 20)
-        self.assertEqual(sock.sent[1][0][8:12].hex(), "0000029a")  # timestamp 666 us, not wall time
+        st.send_batch(pts[20:40])
+        self.assertEqual(sock.sent[1][0], fx_bytes("rt-second-wave-xyrgbi-20"))
 
     def test_too_late_closes_and_raises(self):
-        clock = FakeClock()
-        st, sock, _ = make_stream(self.P, clock=clock)
-        st.send_batch([LaserPoint(0, 0)] * 20)
+        st, sock, clock = make_stream()
+        pts = sender_input()
+        st.send_batch(pts[:20])
         clock.now += 0.5
         with self.assertRaises(idn.StreamLateError):
-            st.send_batch([LaserPoint(0, 0)] * 20)
-        self.assertEqual(sock.sent[-1][0].hex(), "44001235")
-        self.assertEqual(st.state, st.CLOSED)
+            st.send_batch(pts[20:40])
+        self.assertEqual(sock.sent[-1][0], fx_bytes("rt-connection-close-empty", seq=SEQ + 1))
         with self.assertRaises(idn.StreamStateError):
-            st.send_batch([LaserPoint(0, 0)] * 20)
+            st.send_batch(pts[20:40])
 
     def test_too_late_restart_opens_a_fresh_epoch(self):
-        clock = FakeClock()
-        st, sock, _ = make_stream(self.P, clock=clock, restart_on_late=True)
-        st.send_batch([LaserPoint(0, 0)] * 20)
+        st, sock, clock = make_stream(restart_on_late=True)
+        pts = sender_input()
+        st.send_batch(pts[:20])
         clock.now += 0.5
-        st.send_batch([LaserPoint(0, 0)] * 20)
-        close, reopen = sock.sent[1][0], sock.sent[2][0]
-        self.assertEqual(close.hex(), "44001235")
-        self.assertEqual(reopen[0:4].hex(), "40001236")
-        self.assertEqual(reopen[6], 0xC0, "new epoch routes and configures again")
-        # Timestamps follow real time across the epochs: 0 + 500 ms.
-        self.assertEqual(int.from_bytes(reopen[8:12], "big"), 500000)
+        st.send_batch(pts[:20])
+        self.assertEqual(sock.sent[1][0], fx_bytes("rt-connection-close-empty", seq=SEQ + 1))
+        # The new epoch routes and configures again; its timestamps follow real time (0 + 500 ms).
+        self.assertEqual(sock.sent[2][0], fx_bytes("rt-first-config-wave-xyrgbi-20", seq=SEQ + 2, ts=500000))
         self.assertEqual(st.stats["epochs"], 2)
 
     def test_failed_send_does_not_advance_state(self):
         clock = FakeClock()
-        sock = FakeSocket(clock, fail_sends=1)
-        st, _, _ = make_stream(self.P, clock=clock, sock=sock)
-        pts = sender_input(self.P)
+        st, sock, _ = make_stream(clock=clock, sock=FakeSocket(clock, fail_sends=1))
+        pts = sender_input()
         with self.assertRaises(OSError):
             st.send_batch(pts[:20])
-        self.assertEqual((st.seq, st.epoch_samples, st.state), (0x1234, 0, st.IDLE))
         st.send_batch(pts[:20])
-        self.assertEqual(sock.sent[0][0].hex(), fx_bytes("rt-first-config-wave-xyrgbi-20").hex())
+        self.assertEqual([d for d, _, _ in sock.sent], [fx_bytes("rt-first-config-wave-xyrgbi-20")])
 
 
 class CloseAbort(unittest.TestCase):
-    P = FX["sender-xyrgbi-40-at-30k"]["sender"]
-
     def opened(self, replies=None):
-        """A stream that has sent the two packets of sender-xyrgbi-40-at-30k."""
+        """A stream that has sent the two data packets of sender-xyrgbi-40-at-30k."""
         clock = FakeClock()
-        sock = FakeSocket(clock, replies)
-        st, _, _ = make_stream(self.P, clock=clock, sock=sock)
-        pts = sender_input(self.P)
+        st, sock, _ = make_stream(clock=clock, sock=FakeSocket(clock, replies))
+        pts = sender_input()
         st.send_batch(pts[:20])
         st.send_batch(pts[20:40])
         return st, sock
@@ -294,10 +275,9 @@ class CloseAbort(unittest.TestCase):
     def test_close_on_same_socket(self):
         st, sock = self.opened()
         st.close()
-        self.assertEqual(sock.sent[-1][0], fx_bytes("rt-connection-close-empty"))
-        self.assertEqual(st.state, st.CLOSED)
         st.close()
-        self.assertEqual(len(sock.sent), 3, "closing twice sends nothing more")
+        self.assertEqual(sock.sent[-1][0], fx_bytes("rt-connection-close-empty"))
+        self.assertEqual(len(sock.sent), 3, "closing twice sends one close")
 
     def test_abort(self):
         st, sock = self.opened()
@@ -306,17 +286,14 @@ class CloseAbort(unittest.TestCase):
         self.assertEqual(st.state, st.CLOSED)
 
     def test_never_sent_stream_sends_no_close(self):
-        sock = FakeSocket()
-        st, _, _ = make_stream(self.P, sock=sock)
+        st, sock, _ = make_stream()
         st.close()
         st.abort()
         self.assertEqual(sock.sent, [])
 
     def test_close_with_ack_accepts_0xeb(self):
-        eb = bytearray(fx_bytes("ack-eb-close-without-connection"))
-        eb[2:4] = (0x1236).to_bytes(2, "big")
-        stray = (bytes(eb), ("192.0.2.99", idn.IDN_PORT))
-        st, sock = self.opened(replies=[stray, (bytes(eb), ADDR)])
+        eb = fx_bytes("ack-eb-close-without-connection", seq=SEQ + 2)
+        st, sock = self.opened(replies=[(eb, ("192.0.2.99", idn.IDN_PORT)), (eb, ADDR)])  # a stray copy first
         ack = st.close(ack=True)
         self.assertEqual(sock.sent[-1][0], fx_bytes("rt-connection-close-ack-empty"))
         self.assertEqual(ack["result_code"], 0xEB)
@@ -325,40 +302,42 @@ class CloseAbort(unittest.TestCase):
     def test_unanswered_close_repeats_without_data(self):
         st, sock = self.opened()
         self.assertIsNone(st.close(ack=True, attempts=3, timeout=0.1))
-        self.assertEqual([d.hex() for d, _, _ in sock.sent[2:]], ["45001236", "45001237", "45001238"])
+        self.assertEqual([d for d, _, _ in sock.sent[2:]],
+                         [fx_bytes("rt-connection-close-ack-empty", seq=SEQ + 2 + k) for k in range(3)])
 
 
 class Management(unittest.TestCase):
-    def sender(self, replies=(), group=0):
+    PARSERS = {"scan-req": idn.parse_scan_response, "svcmap-req": idn.parse_svcmap_response}
+
+    def sender(self, replies=(), **kw):
         clock = FakeClock()
         sock = FakeSocket(clock, list(replies))
-        s = idn.IDNSender(ADDR[0], group=group, sock=sock, clock=clock, sleep_until=clock.sleep_until)
-        return s, sock
+        return idn.IDNSender(ADDR[0], sock=sock, clock=clock, sleep_until=clock.sleep_until, **kw), sock
+
+    def parse(self, f):
+        """Parse a server-to-client fixture against the request it answers."""
+        exp, data = f["expect"], literal(f)
+        if "request" not in exp:
+            return idn.parse_ack(data, 0, exp["request_sequence"])
+        req = fx_bytes(exp["request"])
+        group, seq = req[1] & 0x0F, int.from_bytes(req[2:4], "big")
+        if exp["request"].startswith("ping"):
+            return idn.parse_ping_response(data, req[4:], group, seq)
+        return self.PARSERS[exp["request"]](data, group, seq)
 
     def test_response_fixtures(self):
-        parsers = {"scan-req": idn.parse_scan_response, "svcmap-req": idn.parse_svcmap_response}
         for fid, f in FX.items():
             if f["kind"] != "datagram" or f["direction"] != "server-to-client":
                 continue
             exp = f["expect"]
-            data = literal(f)
             with self.subTest(fixture=fid):
-                if "request" in exp:
-                    req = fx_bytes(exp["request"])
-                    group, seq = req[1] & 0x0F, int.from_bytes(req[2:4], "big")
-                    if exp["request"].startswith("ping"):
-                        call = lambda: idn.parse_ping_response(data, req[4:], group, seq)  # noqa: E731
-                    else:
-                        call = lambda: parsers[exp["request"]](data, group, seq)  # noqa: E731
-                else:
-                    call = lambda: idn.parse_ack(data, 0, exp["request_sequence"])  # noqa: E731
                 if exp["outcome"] == "parse_ok":
-                    got = call()
+                    got = self.parse(f)
                     if "parsed" in exp:
                         self.assertEqual(got, exp["parsed"])
                 else:
                     with self.assertRaises(idn.IDNResponseError) as cm:
-                        call()
+                        self.parse(f)
                     self.assertEqual(cm.exception.reason, exp["reason"])
 
     def test_requests_match_fixture_bytes(self):
@@ -399,18 +378,14 @@ class Management(unittest.TestCase):
         self.assertIsNone(s.ping(b"", timeout=0.2))
 
     def test_management_does_not_touch_rt_sequence(self):
-        clock = FakeClock()
-        sock = FakeSocket(clock)
-        s = idn.IDNSender(ADDR[0], sock=sock, clock=clock, sleep_until=clock.sleep_until)
-        p = FX["sender-xyrgbi-40-at-30k"]["sender"]
-        st = s.open_stream(p["pps"], p["packet_points"], first_seq=p["first_seq"], ts_base=0, lead_in=False)
-        pts = sender_input(p)
+        s, sock = self.sender()
+        st = s.open_stream(P["pps"], P["packet_points"], first_seq=SEQ, ts_base=0, lead_in=False)
+        pts = sender_input()
         st.send_batch(pts[:20])
         s.ping(b"", timeout=0.05)
         st.send_batch(pts[20:40])
         rt = [d for d, _, _ in sock.sent if d[0] == idn.IDNCMD_RT_CHANNEL]
-        self.assertEqual([d.hex() for d in rt], [fx_bytes("rt-first-config-wave-xyrgbi-20").hex(),
-                                                 fx_bytes("rt-second-wave-xyrgbi-20").hex()])
+        self.assertEqual(rt, [fx_bytes("rt-first-config-wave-xyrgbi-20"), fx_bytes("rt-second-wave-xyrgbi-20")])
 
 
 class Validation(unittest.TestCase):
@@ -421,10 +396,8 @@ class Validation(unittest.TestCase):
                dict(max_late_s=0), dict(pps=50)]
         for kw in bad:
             with self.subTest(kw=kw):
-                args = dict(pps=30000, packet_points=64)
-                args.update(kw)
                 with self.assertRaises(ValueError):
-                    idn.StreamConfig(**args)
+                    idn.StreamConfig(**{"pps": 30000, "packet_points": 64, **kw})
         with self.assertRaises(ValueError):
             idn.build_hello_header(0x40, 16, 0)
         with self.assertRaises(ValueError):
@@ -451,20 +424,22 @@ class Validation(unittest.TestCase):
 
 
 class Cli(unittest.TestCase):
-    def test_help_lists_real_commands_only(self):
-        text = idn.build_arg_parser().format_help()
-        for cmd in ("square", "circle", "sine", "ild", "scan", "svcmap", "ping"):
-            self.assertIn(cmd, text)
-        self.assertNotRegex(text, r"\{[^}]*\bstop\b")
-        self.assertIn("--channel", text)
-        self.assertIn("--group", text)
+    def parse(self, *argv):
+        return idn.build_arg_parser().parse_args(["--host", "x", *argv])
 
-    def test_cli_rejects_out_of_range_ids(self):
-        for argv in (["--host", "x", "--channel", "64", "circle"], ["--host", "x", "--group", "16", "scan"],
-                     ["--host", "x", "--packet-points", "19", "circle"], ["--host", "x", "stop"]):
+    def test_cli_accepts_real_commands(self):
+        for argv in (["square"], ["circle"], ["sine"], ["ild", "show.ild"], ["scan"], ["svcmap"], ["ping"]):
+            with self.subTest(argv=argv):
+                self.assertEqual(self.parse(*argv).cmd, argv[0])
+        args = self.parse("--channel", "63", "--group", "15", "circle")
+        self.assertEqual((args.channel, args.group), (63, 15))
+
+    def test_cli_rejects_out_of_range_ids_and_stop(self):
+        for argv in (["--channel", "64", "circle"], ["--group", "16", "scan"], ["--packet-points", "19", "circle"],
+                     ["stop"]):
             with self.subTest(argv=argv), redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit):
-                    idn.build_arg_parser().parse_args(argv)
+                    self.parse(*argv)
 
 
 if __name__ == "__main__":

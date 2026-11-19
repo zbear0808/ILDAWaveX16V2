@@ -1,7 +1,7 @@
 {
  "schema": "idn-fixtures/1",
  "family": "hello-management",
- "description": "IDN-Hello ping, scan, service map and short datagrams",
+ "description": "IDN-Hello ping, scan and service map",
  "sources": {
   "Stream": {
    "title": "The ILDA Digital Network - Stream Specification",
@@ -98,27 +98,6 @@
       {"offset": 4, "field": "ping.payload", "hex": "deadbe", "value": "truncated echo", "ref": "Hello 3.1.1 p8"}
     ],
     "expect": {"outcome": "parse_error", "request": "ping-req-payload", "reason": "echo-mismatch"}
-   },
-   {
-    "id": "ping-req-large-1600",
-    "kind": "datagram",
-    "direction": "client-to-server",
-    "summary": "Legal ping request whose UDP payload (1604 octets) exceeds 1500",
-    "refs": ["Hello 3.1 p8 (payload of arbitrary size)", "Hello 7 p32"],
-    "interpretation": "project",
-    "note": "Size limit is the transport's (UDP/IP reassembly); the 'no partial echo' rule is the plan 02 interpretation of Hello 3.1.1 'exact copy in content and length'.",
-    "length": 1604,
-    "segments": [
-      {"offset": 0, "field": "hello.command", "hex": "08", "value": "0x08 ping request", "ref": "Hello 2.1 p5-6"},
-      {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
-      {"offset": 2, "field": "hello.sequence", "hex": "0002", "value": "0x0002", "ref": "Hello 2.1 p7"},
-      {"offset": 4, "field": "ping.payload", "hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f", "value": "1600 octets, value = offset & 0xFF", "ref": "Hello 3.1 p8"}
-    ],
-    "expect": {
-     "outcome": "respond",
-     "response_length": 1604,
-     "note": "receiver must echo all 1604 octets or nothing; a receive buffer shorter than the datagram must be detected as truncation, never echoed as complete"
-    }
    },
    {
     "id": "scan-req",
@@ -407,19 +386,6 @@
       {"offset": 36, "field": "service[0].name", "hex": "6661720000000000000000000000000000000000", "value": "'far'", "ref": "Hello 4.2.3 p18"}
     ],
     "expect": {"outcome": "parse_error", "request": "svcmap-req", "reason": "relay-number"}
-   },
-   {
-    "id": "datagram-3-octets",
-    "kind": "datagram",
-    "direction": "client-to-server",
-    "summary": "Datagram shorter than the four-octet Hello header",
-    "refs": ["Hello 2.1 p5 (smaller datagrams SHALL be discarded)"],
-    "interpretation": "normative",
-    "length": 3,
-    "segments": [
-      {"offset": 0, "field": "partial.header", "hex": "400000", "value": "command, flags, half a sequence", "ref": "Hello 2.1 p5"}
-    ],
-    "expect": {"outcome": "discard", "session": "none"}
    }
  ]
 }

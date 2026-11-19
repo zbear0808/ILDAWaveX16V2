@@ -22,7 +22,7 @@ Policy decisions:
 
 Shutter gate: not implemented. V2 GPIO40 polarity comes from schematic reading only and has not been measured, so no V2 shutter control was added. V1 keeps its existing open-on-start / close-on-stop behaviour on GPIO8 (also unmeasured). `0x4101` is rejected.
 
-Tests: `tests/idn/native/decoder/` (CTest target `idn_decoder`) compiles the real module with `-Wall -Wextra -Werror` and covers the acceptance table at the decoder level. The DAC-code check mirrors the RP/V1 `signed_to_dac()` formula; those static functions are not compiled by the test. "Old decoder not reused" is tested at the decoder contract; the `idn_protocol.c` integration was only syntax-checked against host stubs.
+Tests: `tests/idn/native/decoder/` (CTest target `idn_decoder`) compiles the real module with `-Wall -Wextra -Werror` and covers the acceptance table at the decoder level. It checks RP sample values (-32768 is DAC code 0); the RP/V1 `signed_to_dac()` conversion is static there and is not compiled by the test. "Old decoder not reused" is tested at the decoder contract; the `idn_protocol.c` integration was only syntax-checked against host stubs.
 
 Not done: ESP V1/V2 and RP2354 builds (toolchains unavailable), hardware checks, lifecycle shutter on both boards, plan 02 channel states/SDM, plan 03 event mapping of decoder results, plan 04 fixtures (tests here embed their own spec-derived bytes).
 
@@ -188,7 +188,7 @@ Use table-driven pure-C tests with literal expected output. Hardware checks must
 
 - [x] No undeclared default layout remains in the IDN receive path. (host-tested decoder; integration syntax-checked only)
 - [x] No unsupported layout can silently shorten sample stride or overwrite another head. (host-tested)
-- [ ] Explicit blanking-related values survive decoding and downstream conversion. (decoding host-tested; downstream conversion mirrored, not measured)
+- [ ] Explicit blanking-related values survive decoding and downstream conversion. (decoding host-tested; downstream conversion not host-tested, not measured)
 - [ ] Lifecycle shutter behavior is implemented and measured on each supported board. (gated: polarity unmeasured)
 - [x] Sample-controlled shutter support or explicit rejection is documented accurately. (rejected)
 - [ ] Typed failures are observable without changing protocol state from the decoder. (typed results returned and logged; plan 03 event mapping pending)

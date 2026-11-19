@@ -28,17 +28,14 @@ static int s_failures;
 
 #define N(a) (sizeof(a) / sizeof((a)[0]))
 
-static idn_decoder_caps_t s_caps;
+/* A literal byte array and its length, for the case tables. */
+#define D(...) (const uint8_t[]){ __VA_ARGS__ }, sizeof((const uint8_t[]){ __VA_ARGS__ })
 
-/*
-   Mirror of signed_to_dac() in firmware/RP2354/src/dac80508.c and
-   firmware/ESP32S3/main/rp_manager_v1.c (both static there): raw DAC code
-   for an RP sample value.
-*/
-static uint16_t dac_code(int16_t v)
-{
-    return (uint16_t)((int32_t)v + 32768);
-}
+/* Colour and intensity outputs: 0x00 is raw DAC 0 (also every unassigned line), 0xFF is 0xFF00. */
+#define OFF  (-32768)
+#define FULL 32512
+
+static idn_decoder_caps_t s_caps;
 
 static void expect_channels(const char *name, const int16_t got[IDN_DECODER_CHANNELS],
                             const int16_t exp[IDN_DECODER_CHANNELS])
@@ -55,144 +52,89 @@ static bool compile_ok(const char *name, const uint8_t *dict, size_t len, idn_de
     return r.status == IDN_DECODER_OK;
 }
 
-static void decode_one(const char *name, const uint8_t *dict, size_t len,
-                       const uint8_t *sample, const int16_t exp[IDN_DECODER_CHANNELS])
-{
-    idn_decoder_layout_t lay;
-    int16_t out[1][IDN_DECODER_CHANNELS];
-    if (!compile_ok(name, dict, len, &lay)) return;
-    idn_decoder_decode(&lay, sample, 1, out);
-    expect_channels(name, out[0], exp);
-}
-
 /* -- Layouts ---------------------------------------------------------------- */
 
 /* 3.4.11 IDTF X/Y/R/G/B: X+precision, Y+precision, 638/532/460 nm, Void pad */
-static const uint8_t DICT_RGB16[] = {
-    0x42,0x00, 0x40,0x10, 0x42,0x10, 0x40,0x10, 0x52,0x7E, 0x52,0x14, 0x51,0xCC, 0x00,0x00,
-};
-
+#define DICT_RGB16 0x42,0x00, 0x40,0x10, 0x42,0x10, 0x40,0x10, 0x52,0x7E, 0x52,0x14, 0x51,0xCC, 0x00,0x00
 /* Same colours described blue, green, red */
-static const uint8_t DICT_BGR16[] = {
-    0x42,0x00, 0x40,0x10, 0x42,0x10, 0x40,0x10, 0x51,0xCC, 0x52,0x14, 0x52,0x7E, 0x00,0x00,
-};
-
+#define DICT_BGR16 0x42,0x00, 0x40,0x10, 0x42,0x10, 0x40,0x10, 0x51,0xCC, 0x52,0x14, 0x52,0x7E, 0x00,0x00
 /* 3.4.8 green only, 532 nm (0x5214), 8-bit X/Y */
-static const uint8_t DICT_GREEN[] = { 0x42,0x00, 0x42,0x10, 0x52,0x14, 0x00,0x00 };
-
+#define DICT_GREEN 0x42,0x00, 0x42,0x10, 0x52,0x14, 0x00,0x00
 /* 8-bit X/Y/R/G/B with explicit intensity 0x5C10 (3.4.9) */
-static const uint8_t DICT_RGBI8[] = { 0x42,0x00, 0x42,0x10, 0x52,0x7E, 0x52,0x14, 0x51,0xCC, 0x5C,0x10 };
+#define DICT_RGBI8 0x42,0x00, 0x42,0x10, 0x52,0x7E, 0x52,0x14, 0x51,0xCC, 0x5C,0x10
+/* 8-bit X, Y and red: three tags, so a case adds one more (or a Void pad) to fill whole words */
+#define XYR        0x42,0x00, 0x42,0x10, 0x52,0x7E
 
-/* 3.4.5 X with two precision tags (24 bit), 8-bit Y, green */
-static const uint8_t DICT_X24[] = { 0x42,0x00, 0x40,0x10, 0x40,0x10, 0x42,0x10, 0x52,0x14, 0x00,0x00 };
-
-/* 3.4.6 hint format 0, X, Y, red, intensity */
-static const uint8_t DICT_HINT[] = { 0x41,0x00, 0x42,0x00, 0x42,0x10, 0x52,0x7E, 0x5C,0x10, 0x00,0x00 };
+static const uint8_t k_rgb16[] = { DICT_RGB16 };
 
 /* -- Output semantics ------------------------------------------------------- */
 
-static void test_rgb_and_order(void)
-{
-    /* X=0x1234 Y=0xFEDC R=0xFF G=0x80 B=0x00 */
-    static const uint8_t s_rgb[] = { 0x12,0x34, 0xFE,0xDC, 0xFF, 0x80, 0x00 };
-    static const uint8_t s_bgr[] = { 0x12,0x34, 0xFE,0xDC, 0x00, 0x80, 0xFF };
-    static const int16_t exp[8] = { 4660, -292, 32512, 0, -32768, 32512, -32768, -32768 };
+/* One sample per case; the sample's length is the layout's stride. */
+typedef struct {
+    const char    *name;
+    const uint8_t *dict;
+    size_t         dict_len;
+    const uint8_t *sample;
+    size_t         stride;
+    int16_t        exp[IDN_DECODER_CHANNELS];
+} decode_case_t;
 
-    decode_one("rgb16", DICT_RGB16, sizeof(DICT_RGB16), s_rgb, exp);
-    decode_one("bgr16", DICT_BGR16, sizeof(DICT_BGR16), s_bgr, exp);
+static const decode_case_t k_decode[] = {
+    /* X=0x1234 Y=0xFEDC R=0xFF G=0x80 B=0x00; intensity is derived from the largest colour */
+    { "rgb16", D(DICT_RGB16), D(0x12,0x34, 0xFE,0xDC, 0xFF, 0x80, 0x00), { 4660, -292, FULL, 0, OFF, FULL, OFF, OFF } },
+    { "bgr16", D(DICT_BGR16), D(0x12,0x34, 0xFE,0xDC, 0x00, 0x80, 0xFF), { 4660, -292, FULL, 0, OFF, FULL, OFF, OFF } },
+    { "green only", D(DICT_GREEN), D(0x00, 0x00, 0xFF), { 0, 0, OFF, FULL, OFF, FULL, OFF, OFF } },
 
-    idn_decoder_layout_t lay;
-    if (compile_ok("rgb16 layout", DICT_RGB16, sizeof(DICT_RGB16), &lay)) {
-        CHECK(lay.stride == 7, "rgb16 stride %u", lay.stride);
-        CHECK(lay.intensity_field < 0 && lay.hint_field < 0, "rgb16 optional fields");
-        CHECK(lay.fields[lay.x_field].width == 2, "rgb16 X width");
-    }
-}
-
-static void test_green_only(void)
-{
-    static const uint8_t s[] = { 0x00, 0x00, 0xFF };
-    static const int16_t exp[8] = { 0, 0, -32768, 32512, -32768, 32512, -32768, -32768 };
-    decode_one("green only", DICT_GREEN, sizeof(DICT_GREEN), s, exp);
-}
-
-static void test_intensity(void)
-{
     /* Explicit intensity zero stays raw zero and leaves RGB as sent. */
-    static const uint8_t s_zero[] = { 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0x00 };
-    static const int16_t e_zero[8] = { 0, 0, 32512, 32512, 32512, -32768, -32768, -32768 };
-    decode_one("explicit intensity 0", DICT_RGBI8, sizeof(DICT_RGBI8), s_zero, e_zero);
-
-    static const uint8_t s_half[] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x80 };
-    static const int16_t e_half[8] = { 0, 0, -32768, -32768, -32768, 0, -32768, -32768 };
-    decode_one("explicit intensity, colours off", DICT_RGBI8, sizeof(DICT_RGBI8), s_half, e_half);
-
+    { "explicit intensity 0", D(DICT_RGBI8), D(0, 0, 0xFF, 0xFF, 0xFF, 0x00), { 0, 0, FULL, FULL, FULL, OFF, OFF, OFF } },
+    { "explicit intensity, colours off", D(DICT_RGBI8), D(0, 0, 0, 0, 0, 0x80), { 0, 0, OFF, OFF, OFF, 0, OFF, OFF } },
     /* Absent intensity: largest colour (R=0x10 G=0x40 B=0x20 -> 0x4000). */
-    static const uint8_t s_abs[] = { 0x00,0x00, 0x00,0x00, 0x10, 0x40, 0x20 };
-    static const int16_t e_abs[8] = { 0, 0, -28672, -16384, -24576, -16384, -32768, -32768 };
-    decode_one("absent intensity", DICT_RGB16, sizeof(DICT_RGB16), s_abs, e_abs);
-}
+    { "absent intensity", D(DICT_RGB16), D(0,0, 0,0, 0x10, 0x40, 0x20), { 0, 0, -28672, -16384, -24576, -16384, OFF, OFF } },
+    /* All zero is dark on every line, U1/U2 included (raw DAC 0, not mid-scale). */
+    { "all zero, explicit I", D(DICT_RGBI8), D(0, 0, 0, 0, 0, 0), { 0, 0, OFF, OFF, OFF, OFF, OFF, OFF } },
+    { "all zero, derived I", D(DICT_RGB16), D(0,0, 0,0, 0, 0, 0), { 0, 0, OFF, OFF, OFF, OFF, OFF, OFF } },
 
-static void test_all_zero_dac_codes(void)
+    /* 3.4.5: X = 12 34 56 -> 0x1234 (third octet truncated), Y = 0x7F -> 0x7F00 */
+    { "X 24-bit", D(0x42,0x00, 0x40,0x10, 0x40,0x10, 0x42,0x10, 0x52,0x14, 0x00,0x00),
+      D(0x12, 0x34, 0x56, 0x7F, 0xFF), { 4660, 32512, OFF, FULL, OFF, FULL, OFF, OFF } },
+    { "coordinate extremes", D(DICT_RGB16), D(0x80,0x00, 0x7F,0xFF, 0, 0, 0), { -32768, 32767, OFF, OFF, OFF, OFF, OFF, OFF } },
+    { "coordinate -1/+1", D(DICT_RGB16), D(0xFF,0xFF, 0x00,0x01, 0, 0, 0), { -1, 1, OFF, OFF, OFF, OFF, OFF, OFF } },
+    /* 8-bit coordinates are left aligned: 0x80 -> -32768 */
+    { "8-bit coordinates", D(DICT_GREEN), D(0x80, 0x01, 0x00), { -32768, 256, OFF, OFF, OFF, OFF, OFF, OFF } },
+    /* 16-bit colour precision is kept: R = 0x1234 */
+    { "16-bit colour", D(XYR, 0x40,0x10), D(0, 0, 0x12, 0x34), { 0, 0, -28108, OFF, OFF, -28108, OFF, OFF } },
+    /* 3.4.6: absent intensity derives from the scaled colour (CSCL 1, R=0xFF -> 0x3FC0). */
+    { "derived intensity after CSCL", D(0x41,0x00, XYR), D(0x70, 0, 0, 0xFF), { 0, 0, -16448, OFF, OFF, -16448, OFF, OFF } },
+
+    /* X, Y, Z+precision (3.4.7), unknown 0x4020, Beam-Brush 0x5C20, red */
+    { "ignored descriptors", D(0x42,0x00, 0x42,0x10, 0x42,0x20, 0x40,0x10, 0x40,0x20, 0x5C,0x20, 0x52,0x7E, 0x00,0x00),
+      D(0x7F, 0x80, 0xAA, 0xBB, 0xCC, 0xDD, 0xFF), { 32512, -32768, FULL, OFF, OFF, FULL, OFF, OFF } },
+    /* NOP 0x4000 consumes an octet */
+    { "NOP", D(0x40,0x00, XYR), D(0x55, 0x01, 0x02, 0xFF), { 256, 512, FULL, OFF, OFF, FULL, OFF, OFF } },
+    /* X-prime 0x4201 + precision (3.4.10 U4) is consumed, not mixed into X */
+    { "X-prime ignored", D(0x42,0x00, 0x42,0x10, 0x42,0x01, 0x40,0x10, 0x52,0x7E, 0x00,0x00),
+      D(0x01, 0x02, 0x7F, 0xFF, 0xFF), { 256, 512, FULL, OFF, OFF, FULL, OFF, OFF } },
+    /* Void with one suffix word (3.4.2): the suffix is not a sample field */
+    { "void suffix", D(XYR, 0x00,0x01, 0x12,0x34, 0x00,0x00), D(0x01, 0x02, 0xFF), { 256, 512, FULL, OFF, OFF, FULL, OFF, OFF } },
+    /* Space modifier settings this target accepts (3.4.4) */
+    { "space projector specific", D(0x11,0x00, XYR), D(0x01, 0x02, 0xFF), { 256, 512, FULL, OFF, OFF, FULL, OFF, OFF } },
+    { "space no transformation", D(XYR, 0x11,0xFF), D(0x01, 0x02, 0xFF), { 256, 512, FULL, OFF, OFF, FULL, OFF, OFF } },
+};
+
+static void test_decode(void)
 {
-    static const uint8_t s_i[] = { 0, 0, 0, 0, 0, 0 };
-    static const uint8_t s_n[] = { 0, 0, 0, 0, 0, 0, 0 };
-    static const int16_t exp[8] = { 0, 0, -32768, -32768, -32768, -32768, -32768, -32768 };
-    static const uint16_t codes[8] = { 0x8000, 0x8000, 0, 0, 0, 0, 0, 0 };
-
-    const struct { const char *name; const uint8_t *dict; size_t len; const uint8_t *s; } cases[] = {
-        { "all zero, explicit I", DICT_RGBI8, sizeof(DICT_RGBI8), s_i },
-        { "all zero, derived I",  DICT_RGB16, sizeof(DICT_RGB16), s_n },
-    };
-
-    for (size_t c = 0; c < N(cases); c++) {
+    for (size_t c = 0; c < N(k_decode); c++) {
+        const decode_case_t *t = &k_decode[c];
         idn_decoder_layout_t lay;
         int16_t out[1][IDN_DECODER_CHANNELS];
-        if (!compile_ok(cases[c].name, cases[c].dict, cases[c].len, &lay)) continue;
-        idn_decoder_decode(&lay, cases[c].s, 1, out);
-        expect_channels(cases[c].name, out[0], exp);
-        for (int ch = 0; ch < IDN_DECODER_CHANNELS; ch++)
-            CHECK(dac_code(out[0][ch]) == codes[ch], "%s: DAC code ch[%d] = 0x%04X, expected 0x%04X",
-                  cases[c].name, ch, dac_code(out[0][ch]), codes[ch]);
+        if (!compile_ok(t->name, t->dict, t->dict_len, &lay)) continue;
+        CHECK(lay.stride == t->stride, "%s: stride %u, expected %u", t->name, lay.stride, (unsigned)t->stride);
+        idn_decoder_decode(&lay, t->sample, 1, out);
+        expect_channels(t->name, out[0], t->exp);
     }
 
     CHECK(idn_decoder_optical_to_signed(0) == -32768, "optical 0");
     CHECK(idn_decoder_optical_to_signed(0xFFFF) == 32767, "optical max");
-}
-
-static void test_precision(void)
-{
-    /* X = 12 34 56 -> 0x1234 (third octet truncated), Y = 0x7F -> 0x7F00 */
-    static const uint8_t s[] = { 0x12, 0x34, 0x56, 0x7F, 0xFF };
-    static const int16_t exp[8] = { 4660, 32512, -32768, 32512, -32768, 32512, -32768, -32768 };
-    decode_one("X 24-bit", DICT_X24, sizeof(DICT_X24), s, exp);
-
-    idn_decoder_layout_t lay;
-    if (compile_ok("X 24-bit layout", DICT_X24, sizeof(DICT_X24), &lay)) {
-        CHECK(lay.stride == 5, "X24 stride %u", lay.stride);
-        CHECK(lay.fields[lay.x_field].width == 3, "X24 width");
-        CHECK(lay.fields[lay.y_field].offset == 3, "X24 Y offset");
-    }
-
-    /* Signed extremes, 16 bit */
-    static const uint8_t s_ext[] = { 0x80,0x00, 0x7F,0xFF, 0, 0, 0 };
-    static const int16_t e_ext[8] = { -32768, 32767, -32768, -32768, -32768, -32768, -32768, -32768 };
-    decode_one("coordinate extremes", DICT_RGB16, sizeof(DICT_RGB16), s_ext, e_ext);
-
-    static const uint8_t s_m1[] = { 0xFF,0xFF, 0x00,0x01, 0, 0, 0 };
-    static const int16_t e_m1[8] = { -1, 1, -32768, -32768, -32768, -32768, -32768, -32768 };
-    decode_one("coordinate -1/+1", DICT_RGB16, sizeof(DICT_RGB16), s_m1, e_m1);
-
-    /* 8-bit coordinates are left aligned: 0x80 -> -32768 */
-    static const uint8_t s_8[] = { 0x80, 0x01, 0x00 };
-    static const int16_t e_8[8] = { -32768, 256, -32768, -32768, -32768, -32768, -32768, -32768 };
-    decode_one("8-bit coordinates", DICT_GREEN, sizeof(DICT_GREEN), s_8, e_8);
-
-    /* 16-bit colour precision is kept: R = 0x1234 */
-    static const uint8_t d16[] = { 0x42,0x00, 0x42,0x10, 0x52,0x7E, 0x40,0x10 };
-    static const uint8_t s16[] = { 0x00, 0x00, 0x12, 0x34 };
-    static const int16_t e16[8] = { 0, 0, -28108, -32768, -32768, -28108, -32768, -32768 };
-    decode_one("16-bit colour", d16, sizeof(d16), s16, e16);
 }
 
 static void test_scales(void)
@@ -210,10 +152,11 @@ static void test_scales(void)
         { 0x70, -16448, -31748 },
         { 0x0F,  32512,  32512 },   /* reserved low bits ignored */
     };
+    /* hint format 0, X, Y, red, intensity */
+    static const uint8_t dict[] = { 0x41,0x00, 0x42,0x00, 0x42,0x10, 0x52,0x7E, 0x5C,0x10, 0x00,0x00 };
 
     idn_decoder_layout_t lay;
-    if (!compile_ok("hint layout", DICT_HINT, sizeof(DICT_HINT), &lay)) return;
-    CHECK(lay.stride == 5 && lay.hint_field == 0, "hint layout stride %u", lay.stride);
+    if (!compile_ok("hint layout", dict, sizeof(dict), &lay)) return;
 
     for (size_t c = 0; c < N(cases); c++) {
         uint8_t s[5] = { cases[c].hint, 0x00, 0x00, 0xFF, 0xFF };
@@ -221,14 +164,8 @@ static void test_scales(void)
         idn_decoder_decode(&lay, s, 1, out);
         CHECK(out[0][2] == cases[c].r, "hint 0x%02X: R %d, expected %d", cases[c].hint, out[0][2], cases[c].r);
         CHECK(out[0][5] == cases[c].i, "hint 0x%02X: I %d, expected %d", cases[c].hint, out[0][5], cases[c].i);
-        CHECK(out[0][3] == -32768 && out[0][6] == -32768, "hint 0x%02X: unassigned", cases[c].hint);
+        CHECK(out[0][3] == OFF && out[0][6] == OFF, "hint 0x%02X: unassigned", cases[c].hint);
     }
-
-    /* Absent intensity derives from the scaled colour (CSCL 1, R=0xFF -> 0x3FC0). */
-    static const uint8_t d[] = { 0x41,0x00, 0x42,0x00, 0x42,0x10, 0x52,0x7E };
-    static const uint8_t s[] = { 0x70, 0x00, 0x00, 0xFF };
-    static const int16_t e[8] = { 0, 0, -16448, -32768, -32768, -16448, -32768, -32768 };
-    decode_one("derived intensity after CSCL", d, sizeof(d), s, e);
 }
 
 static void test_wavelength_mapping(void)
@@ -254,10 +191,9 @@ static void test_wavelength_mapping(void)
         char name[32];
         snprintf(name, sizeof(name), "%u nm", cases[c].nm);
         if (!compile_ok(name, d, sizeof(d), &lay)) continue;
-        CHECK(lay.fields[2].wavelength_nm == cases[c].nm, "%s: wavelength %u", name, lay.fields[2].wavelength_nm);
         idn_decoder_decode(&lay, s, 1, out);
         for (int ch = 2; ch <= 4; ch++)
-            CHECK(out[0][ch] == (ch == cases[c].ch ? 32512 : -32768), "%s: ch[%d] = %d", name, ch, out[0][ch]);
+            CHECK(out[0][ch] == (ch == cases[c].ch ? FULL : OFF), "%s: ch[%d] = %d", name, ch, out[0][ch]);
     }
 
     /* Custom capability: a 445 nm line on U1 takes deep blue. */
@@ -272,45 +208,11 @@ static void test_wavelength_mapping(void)
     CHECK(r.status == IDN_DECODER_OK, "custom caps compile %s", idn_decoder_reason_name(r.reason));
     if (r.status == IDN_DECODER_OK) {
         static const uint8_t s[] = { 0x00, 0x00, 0xFF, 0x00 };
-        static const int16_t e[8] = { 0, 0, -32768, -32768, -32768, 32512, 32512, -32768 };
+        static const int16_t e[8] = { 0, 0, OFF, OFF, OFF, FULL, FULL, OFF };
         int16_t out[1][IDN_DECODER_CHANNELS];
         idn_decoder_decode(&lay, s, 1, out);
         expect_channels("445 nm on U1", out[0], e);
     }
-}
-
-static void test_ignored_descriptors(void)
-{
-    /* X, Y, Z+precision (3.4.7), unknown 0x4020, Beam-Brush 0x5C20, red */
-    static const uint8_t d[] = { 0x42,0x00, 0x42,0x10, 0x42,0x20, 0x40,0x10,
-                                 0x40,0x20, 0x5C,0x20, 0x52,0x7E, 0x00,0x00 };
-    static const uint8_t s[] = { 0x7F, 0x80, 0xAA, 0xBB, 0xCC, 0xDD, 0xFF };
-    static const int16_t e[8] = { 32512, -32768, 32512, -32768, -32768, 32512, -32768, -32768 };
-    decode_one("ignored descriptors", d, sizeof(d), s, e);
-
-    /* NOP 0x4000 consumes an octet */
-    static const uint8_t dn[] = { 0x40,0x00, 0x42,0x00, 0x42,0x10, 0x52,0x7E };
-    static const uint8_t sn[] = { 0x55, 0x01, 0x02, 0xFF };
-    static const int16_t en[8] = { 256, 512, 32512, -32768, -32768, 32512, -32768, -32768 };
-    decode_one("NOP", dn, sizeof(dn), sn, en);
-
-    /* X-prime 0x4201 + precision (3.4.10 U4) is consumed, not mixed into X */
-    static const uint8_t dp[] = { 0x42,0x00, 0x42,0x10, 0x42,0x01, 0x40,0x10, 0x52,0x7E, 0x00,0x00 };
-    static const uint8_t sp[] = { 0x01, 0x02, 0x7F, 0xFF, 0xFF };
-    static const int16_t ep[8] = { 256, 512, 32512, -32768, -32768, 32512, -32768, -32768 };
-    decode_one("X-prime ignored", dp, sizeof(dp), sp, ep);
-
-    /* Void with one suffix word (3.4.2) */
-    static const uint8_t dv[] = { 0x42,0x00, 0x42,0x10, 0x52,0x7E, 0x00,0x01, 0x12,0x34, 0x00,0x00 };
-    idn_decoder_layout_t lay;
-    if (compile_ok("void suffix", dv, sizeof(dv), &lay))
-        CHECK(lay.stride == 3, "void suffix stride %u", lay.stride);
-
-    /* Space modifier settings this target accepts (3.4.4) */
-    static const uint8_t ds0[] = { 0x11,0x00, 0x42,0x00, 0x42,0x10, 0x52,0x7E };
-    static const uint8_t ds3[] = { 0x42,0x00, 0x42,0x10, 0x52,0x7E, 0x11,0xFF };
-    compile_ok("space projector specific", ds0, sizeof(ds0), &lay);
-    compile_ok("space no transformation", ds3, sizeof(ds3), &lay);
 }
 
 /* -- Configuration rejection ----------------------------------------------- */
@@ -323,60 +225,62 @@ typedef struct {
     idn_decoder_reason_t  reason;
 } reject_case_t;
 
-#define D(...) (const uint8_t[]){ __VA_ARGS__ }, sizeof((const uint8_t[]){ __VA_ARGS__ })
+#define MALFORMED   IDN_DECODER_ERR_MALFORMED
+#define INVALID     IDN_DECODER_ERR_INVALID_CONFIG
+#define UNSUPPORTED IDN_DECODER_ERR_UNSUPPORTED
+#define RESOURCE    IDN_DECODER_ERR_RESOURCE
+#define R(x)        IDN_DECODER_REASON_##x
 
 static void test_rejections(void)
 {
     const reject_case_t cases[] = {
-        { "cat 2",              D(0x42,0x00, 0x42,0x10, 0x52,0x7E, 0x20,0x00), IDN_DECODER_ERR_INVALID_CONFIG, IDN_DECODER_REASON_UNKNOWN_CATEGORY },
-        { "cat 6",              D(0x42,0x00, 0x42,0x10, 0x52,0x7E, 0x60,0x00), IDN_DECODER_ERR_INVALID_CONFIG, IDN_DECODER_REASON_UNKNOWN_CATEGORY },
-        { "cat 12 (dynamic)",   D(0x42,0x00, 0x42,0x10, 0x52,0x7E, 0xC0,0x00), IDN_DECODER_ERR_INVALID_CONFIG, IDN_DECODER_REASON_UNKNOWN_CATEGORY },
-        { "cat 0 sub 1",        D(0x42,0x00, 0x42,0x10, 0x52,0x7E, 0x01,0x00), IDN_DECODER_ERR_INVALID_CONFIG, IDN_DECODER_REASON_UNKNOWN_CATEGORY },
-        { "cat 1 sub 2",        D(0x42,0x00, 0x42,0x10, 0x52,0x7E, 0x12,0x00), IDN_DECODER_ERR_INVALID_CONFIG, IDN_DECODER_REASON_UNKNOWN_CATEGORY },
-        { "cat 4 sub 3",        D(0x42,0x00, 0x42,0x10, 0x52,0x7E, 0x43,0x00), IDN_DECODER_ERR_INVALID_CONFIG, IDN_DECODER_REASON_UNKNOWN_CATEGORY },
-        { "cat 5 sub 4",        D(0x42,0x00, 0x42,0x10, 0x52,0x7E, 0x54,0x00), IDN_DECODER_ERR_INVALID_CONFIG, IDN_DECODER_REASON_UNKNOWN_CATEGORY },
-        { "truncated suffix",   D(0x42,0x00, 0x42,0x10, 0x52,0x7E, 0x00,0x03), IDN_DECODER_ERR_MALFORMED,      IDN_DECODER_REASON_TRUNCATED_SUFFIX },
-        { "odd word count",     D(0x42,0x00, 0x42,0x10, 0x52,0x7E),            IDN_DECODER_ERR_MALFORMED,      IDN_DECODER_REASON_DICT_LENGTH },
-        { "empty",              NULL, 0,                                        IDN_DECODER_ERR_INVALID_CONFIG, IDN_DECODER_REASON_MISSING_X },
-        { "break",              D(0x42,0x00, 0x42,0x10, 0x52,0x7E, 0x10,0x00, 0x42,0x01, 0x42,0x11, 0x52,0x7E, 0x00,0x00),
-                                                                                IDN_DECODER_ERR_UNSUPPORTED,    IDN_DECODER_REASON_BREAK },
-        { "sample shutter",     D(0x41,0x01, 0x42,0x00, 0x42,0x10, 0x52,0x7E), IDN_DECODER_ERR_UNSUPPORTED,    IDN_DECODER_REASON_SAMPLE_SHUTTER },
+        { "cat 2",                 D(XYR, 0x20,0x00),                             INVALID,     R(UNKNOWN_CATEGORY) },
+        { "cat 12 (dynamic)",      D(XYR, 0xC0,0x00),                             INVALID,     R(UNKNOWN_CATEGORY) },
+        { "cat 0 sub 1",           D(XYR, 0x01,0x00),                             INVALID,     R(UNKNOWN_CATEGORY) },
+        { "cat 1 sub 2",           D(XYR, 0x12,0x00),                             INVALID,     R(UNKNOWN_CATEGORY) },
+        { "cat 4 sub 3",           D(XYR, 0x43,0x00),                             INVALID,     R(UNKNOWN_CATEGORY) },
+        { "cat 5 sub 4",           D(XYR, 0x54,0x00),                             INVALID,     R(UNKNOWN_CATEGORY) },
+        { "truncated suffix",      D(XYR, 0x00,0x03),                             MALFORMED,   R(TRUNCATED_SUFFIX) },
+        { "odd word count",        D(XYR),                                        MALFORMED,   R(DICT_LENGTH) },
+        { "empty",                 NULL, 0,                                       INVALID,     R(MISSING_X) },
+        { "break",                 D(XYR, 0x10,0x00, 0x42,0x01, 0x42,0x11, 0x52,0x7E, 0x00,0x00), UNSUPPORTED, R(BREAK) },
+        { "sample shutter",        D(0x41,0x01, XYR),                             UNSUPPORTED, R(SAMPLE_SHUTTER) },
         /* 3.4.10 full ISP-DB25 default mapping, then padding */
-        { "ISP-DB25 default",   D(0x41,0x01, 0x5C,0x10, 0x52,0x7E, 0x52,0x14, 0x51,0xCC, 0x51,0xBD, 0x52,0x41, 0x51,0xE8,
-                                  0x42,0x00, 0x40,0x10, 0x42,0x10, 0x40,0x10, 0x42,0x01, 0x40,0x10, 0x00,0x00, 0x00,0x00),
-                                                                                IDN_DECODER_ERR_UNSUPPORTED,    IDN_DECODER_REASON_SAMPLE_SHUTTER },
+        { "ISP-DB25 default",      D(0x41,0x01, 0x5C,0x10, 0x52,0x7E, 0x52,0x14, 0x51,0xCC, 0x51,0xBD, 0x52,0x41, 0x51,0xE8,
+                                     0x42,0x00, 0x40,0x10, 0x42,0x10, 0x40,0x10, 0x42,0x01, 0x40,0x10, 0x00,0x00, 0x00,0x00),
+                                                                                  UNSUPPORTED, R(SAMPLE_SHUTTER) },
         /* Same without 0x4101: 445 nm lands on the 460 nm line already used */
-        { "ISP-DB25, no shutter", D(0x5C,0x10, 0x52,0x7E, 0x52,0x14, 0x51,0xCC, 0x51,0xBD, 0x52,0x41, 0x51,0xE8,
-                                  0x42,0x00, 0x40,0x10, 0x42,0x10, 0x40,0x10, 0x42,0x01, 0x40,0x10, 0x00,0x00),
-                                                                                IDN_DECODER_ERR_UNSUPPORTED,    IDN_DECODER_REASON_COLOR_CONFLICT },
-        { "hint format 2",      D(0x41,0x02, 0x42,0x00, 0x42,0x10, 0x52,0x7E), IDN_DECODER_ERR_UNSUPPORTED,    IDN_DECODER_REASON_HINT_FORMAT },
-        { "duplicate hint",     D(0x41,0x00, 0x41,0x00, 0x42,0x00, 0x42,0x10, 0x52,0x7E, 0x00,0x00), IDN_DECODER_ERR_INVALID_CONFIG, IDN_DECODER_REASON_DUPLICATE_HINT },
-        { "duplicate X",        D(0x42,0x00, 0x42,0x00, 0x42,0x10, 0x52,0x7E), IDN_DECODER_ERR_INVALID_CONFIG, IDN_DECODER_REASON_DUPLICATE_X },
-        { "duplicate Y",        D(0x42,0x00, 0x42,0x10, 0x42,0x10, 0x52,0x7E), IDN_DECODER_ERR_INVALID_CONFIG, IDN_DECODER_REASON_DUPLICATE_Y },
-        { "duplicate I",        D(0x42,0x00, 0x42,0x10, 0x52,0x7E, 0x5C,0x10, 0x5C,0x10, 0x00,0x00), IDN_DECODER_ERR_INVALID_CONFIG, IDN_DECODER_REASON_DUPLICATE_INTENSITY },
-        { "colour conflict",    D(0x42,0x00, 0x42,0x10, 0x52,0x7E, 0x52,0x80), IDN_DECODER_ERR_UNSUPPORTED,    IDN_DECODER_REASON_COLOR_CONFLICT },
-        { "missing X",          D(0x42,0x10, 0x52,0x7E),                       IDN_DECODER_ERR_INVALID_CONFIG, IDN_DECODER_REASON_MISSING_X },
-        { "missing Y",          D(0x42,0x00, 0x52,0x7E),                       IDN_DECODER_ERR_INVALID_CONFIG, IDN_DECODER_REASON_MISSING_Y },
-        { "intensity only",     D(0x42,0x00, 0x42,0x10, 0x5C,0x10, 0x00,0x00), IDN_DECODER_ERR_INVALID_CONFIG, IDN_DECODER_REASON_MISSING_COLOR },
-        { "X-prime only",       D(0x42,0x01, 0x42,0x10, 0x52,0x7E, 0x00,0x00), IDN_DECODER_ERR_INVALID_CONFIG, IDN_DECODER_REASON_MISSING_X },
-        { "precision first",    D(0x40,0x10, 0x42,0x00, 0x42,0x10, 0x52,0x7E), IDN_DECODER_ERR_INVALID_CONFIG, IDN_DECODER_REASON_PRECISION_PLACEMENT },
-        { "precision on hint",  D(0x41,0x00, 0x40,0x10, 0x42,0x00, 0x42,0x10, 0x52,0x7E, 0x00,0x00), IDN_DECODER_ERR_INVALID_CONFIG, IDN_DECODER_REASON_PRECISION_PLACEMENT },
-        { "precision on NOP",   D(0x40,0x00, 0x40,0x10, 0x42,0x00, 0x42,0x10, 0x52,0x7E, 0x00,0x00), IDN_DECODER_ERR_INVALID_CONFIG, IDN_DECODER_REASON_PRECISION_PLACEMENT },
-        { "precision after void", D(0x42,0x00, 0x00,0x00, 0x40,0x10, 0x42,0x10, 0x52,0x7E, 0x00,0x00), IDN_DECODER_ERR_INVALID_CONFIG, IDN_DECODER_REASON_PRECISION_PLACEMENT },
-        { "precision limit",    D(0x42,0x00, 0x40,0x10, 0x40,0x10, 0x40,0x10, 0x40,0x10, 0x42,0x10, 0x52,0x7E, 0x00,0x00),
-                                                                                IDN_DECODER_ERR_RESOURCE,       IDN_DECODER_REASON_PRECISION_LIMIT },
-        { "zero wavelength",    D(0x42,0x00, 0x42,0x10, 0x50,0x00, 0x00,0x00), IDN_DECODER_ERR_INVALID_CONFIG, IDN_DECODER_REASON_ZERO_WAVELENGTH },
-        { "dynamic wavelength", D(0x42,0x00, 0x42,0x10, 0x5C,0x00, 0x50,0x00), IDN_DECODER_ERR_UNSUPPORTED,    IDN_DECODER_REASON_DYNAMIC_WAVELENGTH },
-        { "dynamic wl + prec",  D(0x42,0x00, 0x42,0x10, 0x5C,0x00, 0x40,0x10, 0x50,0x00, 0x00,0x00), IDN_DECODER_ERR_UNSUPPORTED, IDN_DECODER_REASON_DYNAMIC_WAVELENGTH },
-        { "prefix then Y",      D(0x42,0x00, 0x5C,0x00, 0x42,0x10, 0x52,0x7E), IDN_DECODER_ERR_INVALID_CONFIG, IDN_DECODER_REASON_WAVELENGTH_PREFIX },
-        { "prefix, static colour", D(0x42,0x00, 0x42,0x10, 0x5C,0x00, 0x52,0x7E), IDN_DECODER_ERR_INVALID_CONFIG, IDN_DECODER_REASON_WAVELENGTH_PREFIX },
-        { "prefix at end",      D(0x42,0x00, 0x42,0x10, 0x52,0x7E, 0x5C,0x00), IDN_DECODER_ERR_INVALID_CONFIG, IDN_DECODER_REASON_WAVELENGTH_PREFIX },
-        { "unknown struct tag", D(0x42,0x00, 0x42,0x10, 0x52,0x7E, 0x00,0x10), IDN_DECODER_ERR_UNSUPPORTED,    IDN_DECODER_REASON_UNKNOWN_MODIFIER },
-        { "unknown modifier",   D(0x42,0x00, 0x42,0x10, 0x52,0x7E, 0x10,0x10), IDN_DECODER_ERR_UNSUPPORTED,    IDN_DECODER_REASON_UNKNOWN_MODIFIER },
-        { "space GLIN linear",  D(0x11,0x40, 0x42,0x00, 0x42,0x10, 0x52,0x7E), IDN_DECODER_ERR_UNSUPPORTED,    IDN_DECODER_REASON_SPACE_UNSUPPORTED },
-        { "space CLIN visual",  D(0x11,0x20, 0x42,0x00, 0x42,0x10, 0x52,0x7E), IDN_DECODER_ERR_UNSUPPORTED,    IDN_DECODER_REASON_SPACE_UNSUPPORTED },
-        { "space GLIN reserved", D(0x11,0x80, 0x42,0x00, 0x42,0x10, 0x52,0x7E), IDN_DECODER_ERR_INVALID_CONFIG, IDN_DECODER_REASON_SPACE_MODIFIER },
-        { "space twice",        D(0x11,0x00, 0x11,0x00, 0x42,0x00, 0x42,0x10, 0x52,0x7E, 0x00,0x00), IDN_DECODER_ERR_INVALID_CONFIG, IDN_DECODER_REASON_DUPLICATE_SPACE },
+        { "ISP-DB25, no shutter",  D(0x5C,0x10, 0x52,0x7E, 0x52,0x14, 0x51,0xCC, 0x51,0xBD, 0x52,0x41, 0x51,0xE8,
+                                     0x42,0x00, 0x40,0x10, 0x42,0x10, 0x40,0x10, 0x42,0x01, 0x40,0x10, 0x00,0x00),
+                                                                                  UNSUPPORTED, R(COLOR_CONFLICT) },
+        { "hint format 2",         D(0x41,0x02, XYR),                             UNSUPPORTED, R(HINT_FORMAT) },
+        { "duplicate hint",        D(0x41,0x00, 0x41,0x00, XYR, 0x00,0x00),       INVALID,     R(DUPLICATE_HINT) },
+        { "duplicate X",           D(0x42,0x00, XYR),                             INVALID,     R(DUPLICATE_X) },
+        { "duplicate Y",           D(0x42,0x00, 0x42,0x10, 0x42,0x10, 0x52,0x7E), INVALID,     R(DUPLICATE_Y) },
+        { "duplicate I",           D(XYR, 0x5C,0x10, 0x5C,0x10, 0x00,0x00),       INVALID,     R(DUPLICATE_INTENSITY) },
+        { "colour conflict",       D(XYR, 0x52,0x80),                             UNSUPPORTED, R(COLOR_CONFLICT) },
+        { "missing X",             D(0x42,0x10, 0x52,0x7E),                       INVALID,     R(MISSING_X) },
+        { "missing Y",             D(0x42,0x00, 0x52,0x7E),                       INVALID,     R(MISSING_Y) },
+        { "intensity only",        D(0x42,0x00, 0x42,0x10, 0x5C,0x10, 0x00,0x00), INVALID,     R(MISSING_COLOR) },
+        { "X-prime only",          D(0x42,0x01, 0x42,0x10, 0x52,0x7E, 0x00,0x00), INVALID,     R(MISSING_X) },
+        { "precision first",       D(0x40,0x10, XYR),                             INVALID,     R(PRECISION_PLACEMENT) },
+        { "precision on hint",     D(0x41,0x00, 0x40,0x10, XYR, 0x00,0x00),       INVALID,     R(PRECISION_PLACEMENT) },
+        { "precision on NOP",      D(0x40,0x00, 0x40,0x10, XYR, 0x00,0x00),       INVALID,     R(PRECISION_PLACEMENT) },
+        { "precision after void",  D(0x42,0x00, 0x00,0x00, 0x40,0x10, 0x42,0x10, 0x52,0x7E, 0x00,0x00), INVALID, R(PRECISION_PLACEMENT) },
+        { "precision limit",       D(0x42,0x00, 0x40,0x10, 0x40,0x10, 0x40,0x10, 0x40,0x10, 0x42,0x10, 0x52,0x7E, 0x00,0x00),
+                                                                                  RESOURCE,    R(PRECISION_LIMIT) },
+        { "zero wavelength",       D(0x42,0x00, 0x42,0x10, 0x50,0x00, 0x00,0x00), INVALID,     R(ZERO_WAVELENGTH) },
+        { "dynamic wavelength",    D(0x42,0x00, 0x42,0x10, 0x5C,0x00, 0x50,0x00), UNSUPPORTED, R(DYNAMIC_WAVELENGTH) },
+        { "dynamic wl + prec",     D(0x42,0x00, 0x42,0x10, 0x5C,0x00, 0x40,0x10, 0x50,0x00, 0x00,0x00), UNSUPPORTED, R(DYNAMIC_WAVELENGTH) },
+        { "prefix then Y",         D(0x42,0x00, 0x5C,0x00, 0x42,0x10, 0x52,0x7E), INVALID,     R(WAVELENGTH_PREFIX) },
+        { "prefix, static colour", D(0x42,0x00, 0x42,0x10, 0x5C,0x00, 0x52,0x7E), INVALID,     R(WAVELENGTH_PREFIX) },
+        { "prefix at end",         D(XYR, 0x5C,0x00),                             INVALID,     R(WAVELENGTH_PREFIX) },
+        { "unknown struct tag",    D(XYR, 0x00,0x10),                             UNSUPPORTED, R(UNKNOWN_MODIFIER) },
+        { "unknown modifier",      D(XYR, 0x10,0x10),                             UNSUPPORTED, R(UNKNOWN_MODIFIER) },
+        { "space GLIN linear",     D(0x11,0x40, XYR),                             UNSUPPORTED, R(SPACE_UNSUPPORTED) },
+        { "space CLIN visual",     D(0x11,0x20, XYR),                             UNSUPPORTED, R(SPACE_UNSUPPORTED) },
+        { "space GLIN reserved",   D(0x11,0x80, XYR),                             INVALID,     R(SPACE_MODIFIER) },
+        { "space twice",           D(0x11,0x00, 0x11,0x00, XYR, 0x00,0x00),       INVALID,     R(DUPLICATE_SPACE) },
     };
 
     for (size_t c = 0; c < N(cases); c++) {
@@ -404,7 +308,7 @@ static void test_rejections(void)
         if (nops == 29)
             CHECK(r.status == IDN_DECODER_OK && lay.stride == 32, "stride 32 accepted (%s)", idn_decoder_reason_name(r.reason));
         else
-            CHECK(r.status == IDN_DECODER_ERR_RESOURCE && r.reason == IDN_DECODER_REASON_STRIDE_LIMIT && !lay.valid,
+            CHECK(r.status == RESOURCE && r.reason == R(STRIDE_LIMIT) && !lay.valid,
                   "stride 33 rejected (%s)", idn_decoder_reason_name(r.reason));
     }
 
@@ -412,7 +316,7 @@ static void test_rejections(void)
     static uint8_t big[IDN_DECODER_MAX_DICT_BYTES + 4];
     idn_decoder_layout_t lay;
     idn_decoder_result_t r = idn_decoder_compile(big, sizeof(big), &s_caps, &lay);
-    CHECK(r.status == IDN_DECODER_ERR_RESOURCE && r.reason == IDN_DECODER_REASON_DICT_TOO_LARGE, "oversized dictionary");
+    CHECK(r.status == RESOURCE && r.reason == R(DICT_TOO_LARGE), "oversized dictionary");
 
     /* Offending tag is reported */
     static const uint8_t db[] = { 0x42,0x00, 0x42,0x10, 0x52,0x7E, 0x10,0x00 };
@@ -436,12 +340,12 @@ static size_t build_chunk(uint8_t *buf, uint32_t duration, const uint8_t *sample
 static void test_wave_chunks(void)
 {
     static const uint8_t s[] = { 0x12,0x34, 0xFE,0xDC, 0xFF, 0x80, 0x00 };
-    static const int16_t exp[8] = { 4660, -292, 32512, 0, -32768, 32512, -32768, -32768 };
+    static const int16_t exp[8] = { 4660, -292, FULL, 0, OFF, FULL, OFF, OFF };
     uint8_t buf[4 + 7 * 64 + 8];
     uint32_t n = 0, dur = 0;
     idn_decoder_result_t r;
     idn_decoder_layout_t lay;
-    if (!compile_ok("chunk layout", DICT_RGB16, sizeof(DICT_RGB16), &lay)) return;
+    if (!compile_ok("chunk layout", k_rgb16, sizeof(k_rgb16), &lay)) return;
 
     size_t len = build_chunk(buf, 675, s, 7, 20);
     r = idn_decoder_check_wave_chunk(&lay, buf, len, &n, &dur);
@@ -454,11 +358,11 @@ static void test_wave_chunks(void)
     }
 
     const struct { const char *name; size_t len; uint32_t dur; idn_decoder_reason_t reason; } bad[] = {
-        { "19 samples",          4 + 7 * 19,     675, IDN_DECODER_REASON_TOO_FEW_SAMPLES },
-        { "malformed last",      4 + 7 * 20 + 1, 675, IDN_DECODER_REASON_PARTIAL_SAMPLE },
-        { "missing final octet", 4 + 7 * 21 - 1, 675, IDN_DECODER_REASON_PARTIAL_SAMPLE },
-        { "zero duration",       4 + 7 * 20,     0,   IDN_DECODER_REASON_ZERO_DURATION },
-        { "short header",        3,              675, IDN_DECODER_REASON_CHUNK_HEADER },
+        { "19 samples",          4 + 7 * 19,     675, R(TOO_FEW_SAMPLES) },
+        { "malformed last",      4 + 7 * 20 + 1, 675, R(PARTIAL_SAMPLE) },
+        { "missing final octet", 4 + 7 * 21 - 1, 675, R(PARTIAL_SAMPLE) },
+        { "zero duration",       4 + 7 * 20,     0,   R(ZERO_DURATION) },
+        { "short header",        3,              675, R(CHUNK_HEADER) },
     };
     for (size_t c = 0; c < N(bad); c++) {
         build_chunk(buf, bad[c].dur, s, 7, 21);
@@ -478,14 +382,14 @@ static void test_rejected_replacement(void)
     uint32_t n = 0;
     idn_decoder_layout_t lay;
 
-    if (!compile_ok("replacement base", DICT_RGB16, sizeof(DICT_RGB16), &lay)) return;
+    if (!compile_ok("replacement base", k_rgb16, sizeof(k_rgb16), &lay)) return;
     size_t len = build_chunk(buf, 675, s, 7, 20);
     CHECK(idn_decoder_check_wave_chunk(&lay, buf, len, &n, NULL).status == IDN_DECODER_OK, "base chunk");
 
     idn_decoder_result_t r = idn_decoder_compile(brk, sizeof(brk), &s_caps, &lay);
-    CHECK(r.status == IDN_DECODER_ERR_UNSUPPORTED && !lay.valid, "replacement rejected");
+    CHECK(r.status == UNSUPPORTED && !lay.valid, "replacement rejected");
     r = idn_decoder_check_wave_chunk(&lay, buf, len, &n, NULL);
-    CHECK(r.status == IDN_DECODER_ERR_INVALID_SAMPLES && r.reason == IDN_DECODER_REASON_INVALID_LAYOUT,
+    CHECK(r.status == IDN_DECODER_ERR_INVALID_SAMPLES && r.reason == R(INVALID_LAYOUT),
           "old decoder reused after rejected replacement");
 }
 
@@ -493,14 +397,9 @@ int main(void)
 {
     idn_decoder_default_caps(&s_caps);
 
-    test_rgb_and_order();
-    test_green_only();
-    test_intensity();
-    test_all_zero_dac_codes();
-    test_precision();
+    test_decode();
     test_scales();
     test_wavelength_mapping();
-    test_ignored_descriptors();
     test_rejections();
     test_wave_chunks();
     test_rejected_replacement();

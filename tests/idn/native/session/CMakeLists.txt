@@ -14,7 +14,8 @@ target_include_directories(test_idn_session PRIVATE ${FIRMWARE_MAIN})
 set_property(TARGET test_idn_session PROPERTY C_STANDARD 99)
 
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
-    target_compile_options(test_idn_session PRIVATE -Wall -Wextra -Werror)
+    # Each step overrides some of its default fields, e.g. RT(.pev = ...).
+    target_compile_options(test_idn_session PRIVATE -Wall -Wextra -Werror -Wno-override-init)
 endif()
 
 add_test(NAME idn_session COMMAND test_idn_session)

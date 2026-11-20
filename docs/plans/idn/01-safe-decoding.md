@@ -24,7 +24,7 @@ Shutter gate: not implemented. V2 GPIO40 polarity comes from schematic reading o
 
 Tests: `tests/idn/native/decoder/` (CTest target `idn_decoder`) compiles the real module with `-Wall -Wextra -Werror` and covers the acceptance table at the decoder level. It checks RP sample values (-32768 is DAC code 0); the RP/V1 `signed_to_dac()` conversion is static there and is not compiled by the test. "Old decoder not reused" is tested at the decoder contract; the `idn_protocol.c` integration was only syntax-checked against host stubs.
 
-Not done: ESP V1/V2 and RP2354 builds (toolchains unavailable), hardware checks, lifecycle shutter on both boards, plan 02 channel states/SDM, plan 03 event mapping of decoder results, plan 04 fixtures (tests here embed their own spec-derived bytes).
+Not done: ESP V1/V2 and RP2354 builds (toolchains unavailable), hardware checks, lifecycle shutter on both boards, plan 02 channel states/SDM, plan 03 event mapping of decoder results.
 
 ## Purpose and scope
 

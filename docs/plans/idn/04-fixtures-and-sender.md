@@ -201,10 +201,10 @@ Do not land a large permanent set of unexplained expected failures. Use focused 
 
 ## Implementation status
 
-Run with `python tools/test_idn.py` (fixtures, Python, native; no network or hardware).
+Run with `python tools/test_idn.py` (Python and native tests; no network or hardware).
 
-- **Fixtures** — `tests/idn/fixtures/*.json` (format in its `README.md`): 37 fixtures that the Python tests read: management requests and responses, ACKs, the valid stream messages the sender must produce, sender output and tables. Each segment is annotated with field, value and section/page; project interpretations carry a note. PDFs are not committed; provenance records document identifiers and pages. Invalid-input and stateful cases live in the native decoder, session and timing tests (plans 01–03), which embed their own spec-derived bytes.
-- **Runner** — `tools/test_idn.py` validates fixture schema and lengths, runs `tests/idn` unittest, then configures/builds/ctests every `tests/idn/native/*/CMakeLists.txt` separately under `build/idn-tests/` (Ninja or MinGW Makefiles; `--generator`, `--cc`). It reports sanitizer support as unsupported rather than passed. No native targets exist on this branch yet.
+- **Expected packets** — `tests/idn/test_sender.py` writes a stream's first packet byte by byte from the Hello/Stream field tables (it is not produced by the sender) and states every other case as the few fields that differ from it; requests, responses and ACKs are literal bytes too. There are no separate fixture files: the fixture families above were cut back to the cases a test checks. The decoder, session and timing tests (plans 01–03) build their inputs the same way, from one base message plus per-case changes.
+- **Runner** — `tools/test_idn.py` runs the `tests/idn` unittest suite, then configures, builds and runs (ctest) each `tests/idn/native/*/CMakeLists.txt` under `build/idn-tests/` (Ninja when installed, or `--generator`). No native targets exist on this branch yet.
 - **Sender** — `tools/idn_sender.py`: pure builders; `StreamConfig` (validated, no masking); `IDNStream` with explicit idle/streaming/closed state, routing + full dictionary on the first packet, configuration whenever the gap would otherwise exceed 200 ms of stream time, SDM = SCM, 1472-octet budget (179 samples), batch cap by cadence at low rates, ≥20 samples with tail repartition, cumulative integer timestamps with wrap, fake-clock pacing that never sends early, 100 ms lateness limit (close and raise, or `--restart-on-late` for a fresh epoch), state unchanged after a failed send, close/abort/close-with-ACK (0xEB = already closed) on the stream socket. Management (`ping`, `scan`, `svcmap`) uses its own sequence numbers and validates source, command, group, sequence, struct sizes and lengths. The misleading `stop` command was removed.
 - **Decisions** — default service ID 0 (receiver's default for the mode; 1 available via `--service-id`); a blanked origin lead-in sample is prepended by default (`--no-lead-in`); 65 @ 64 → 45 + 20, and a donor that would drop below 20 merges with the remainder when within capacity.
 - **Hardware helpers** — `tools/hwtest.py` uses `IDNStream`; `idn-overrun` is a labelled negative test using the pure builders; `idn-timeout` checks output stop and link release (0xEB probe) separately against 1 s + 0.5 s; packet sizes are 64/120/179. Not run: the current firmware's 6 s link timeout is expected to fail `idn-timeout` until plan 02 lands.
@@ -212,7 +212,7 @@ Run with `python tools/test_idn.py` (fixtures, Python, native; no network or har
 
 ## Acceptance criteria
 
-- [x] Literal spec-derived fixtures exist independently of sender output.
+- [x] Literal spec-derived expected packets exist independently of sender output (in `tests/idn/test_sender.py`).
 - [ ] Actual firmware decoder/session/timing code is executed in host tests. (Runner ready; modules arrive with plans 01–03.)
 - [x] First packet routes/configures; unchanged configuration repeats on time.
 - [x] SDM/SCM agree and sample bytes match the declared dictionary.
@@ -223,4 +223,4 @@ Run with `python tools/test_idn.py` (fixtures, Python, native; no network or har
 - [x] Close/abort use the established socket, and CLI behavior is accurate.
 - [x] Hardware timeout checks cannot pass merely because output eventually stopped within 15 seconds. (Code only; not run on hardware.)
 - [ ] All-target builds and independent-client/receiver checks are reported separately from unit tests. (The runner states they were not run; none were performed.)
-- [ ] Documentation distinguishes verified behavior, unsupported capabilities, and unrun hardware checks. (Done for fixtures, sender help and this plan; top-level README not updated.)
+- [ ] Documentation distinguishes verified behavior, unsupported capabilities, and unrun hardware checks. (Done for the tests, sender help and this plan; top-level README not updated.)

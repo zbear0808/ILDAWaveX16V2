@@ -215,7 +215,8 @@ typedef struct {
     uint8_t              service_mode;
     bool                 splice;        /* a chunk was not queued: blank the move into the next one */
     idn_decoder_layout_t layout;        /* invalid until a configuration compiles */
-    idn_decoder_reason_t last_reject;   /* logged once per change */
+    idn_decoder_reason_t config_reject; /* each logged once per change of its own reason */
+    idn_decoder_reason_t chunk_reject;
 } idn_channel_t;
 
 /* -- SPSC ring buffer (decoded RP samples) --------------------------------- */
@@ -329,11 +330,11 @@ static rp_sample_t s_feed_stage[RP_STREAM_SAMPLES_PER_PACKET];
 /* -- Decoder ---------------------------------------------------------------- */
 static idn_decoder_caps_t s_decoder_caps;
 
-static void log_decoder_reject(uint8_t ch_id, idn_channel_t *ch, const char *what,
+static void log_decoder_reject(uint8_t ch_id, idn_decoder_reason_t *last, const char *what,
                                idn_decoder_result_t r)
 {
-    if (ch->last_reject == r.reason) return;
-    ch->last_reject = r.reason;
+    if (*last == r.reason) return;
+    *last = r.reason;
     ESP_LOGW(TAG, "Channel %u %s rejected: %s (%s), tag 0x%04X at word %u",
              ch_id, what, idn_decoder_status_name(r.status), idn_decoder_reason_name(r.reason),
              r.tag, r.tag_index);
@@ -637,12 +638,12 @@ static void process_channel_config(uint8_t ch_id,
         /* Every routing configuration is compiled; a rejected one leaves the channel without a decoder. */
         idn_decoder_result_t r = idn_decoder_compile(svc_data, svc_bytes, &s_decoder_caps, &ch->layout);
         if (r.status == IDN_DECODER_OK) {
-            if (ch->last_reject != IDN_DECODER_REASON_NONE)
+            if (ch->config_reject != IDN_DECODER_REASON_NONE)
                 ESP_LOGI(TAG, "Channel %u configuration accepted", ch_id);
-            ch->last_reject = IDN_DECODER_REASON_NONE;
+            ch->config_reject = IDN_DECODER_REASON_NONE;
             ESP_LOGD(TAG, "Tag dict: %u bytes/sample", ch->layout.stride);
         } else {
-            log_decoder_reject(ch_id, ch, "configuration", r);
+            log_decoder_reject(ch_id, &ch->config_reject, "configuration", r);
         }
     }
 }
@@ -666,7 +667,7 @@ static void process_wave_chunk(uint8_t ch_id,
     idn_decoder_result_t r = idn_decoder_check_wave_chunk(&ch->layout, data, data_len,
                                                           &nsamples, &duration_us);
     if (r.status != IDN_DECODER_OK) {
-        log_decoder_reject(ch_id, ch, "wave chunk", r);
+        log_decoder_reject(ch_id, &ch->chunk_reject, "wave chunk", r);
         ch->splice = true;
         return;
     }

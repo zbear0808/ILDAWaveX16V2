@@ -54,6 +54,7 @@
 /* Input event flags */
 #define IDN_IEV_NEW                 IDN_INEV_NEW
 #define IDN_IEV_MVERR               IDN_INEV_MVERR
+#define IDN_IEV_OVERR               IDN_INEV_OVERR
 #define IDN_IEV_BPERR               IDN_INEV_BPERR
 #define IDN_IEV_CCERR               IDN_INEV_CCERR
 #define IDN_IEV_IRAERR              IDN_INEV_IRAERR
@@ -139,7 +140,7 @@ typedef enum {
     IDN_CHUNK_TOO_SHORT,        /* MCLErr */
     IDN_CHUNK_PAYLOAD_INVALID,  /* PVLErr */
     IDN_CHUNK_UNSUPPORTED,      /* RGUErr */
-    IDN_CHUNK_DEVICE_OVERRUN,   /* DVIErr: samples dropped downstream */
+    IDN_CHUNK_DEVICE_OVERRUN,   /* DVIErr and OVErr: samples dropped, the queue is full */
     IDN_CHUNK_INTERNAL,         /* IAPErr */
 } idn_chunk_result_t;
 

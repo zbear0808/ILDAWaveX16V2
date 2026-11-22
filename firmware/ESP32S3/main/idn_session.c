@@ -518,6 +518,9 @@ static void process_data(idn_session_t *s, const idn_msg_t *m, uint64_t ts_us)
 
     r = s->ops.wave_enqueue(s->ops.ctx, ch, s->output_gen, m->data, m->data_len);
     pipeline_event(c, chunk_result_event(r));
+    if (r == IDN_CHUNK_DEVICE_OVERRUN) {
+        input_event(s, IDN_IEV_OVERR);      /* more arrived than can be buffered */
+    }
 
     if (r == IDN_CHUNK_OK) {
         idn_wave_commit(&c->wave, ts_us, duration_us);

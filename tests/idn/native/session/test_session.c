@@ -26,7 +26,7 @@
 
 static struct {
     int compiles, acquires, enqueues, releases, violations, starts, breaks;
-    bool acquire_ok, release_ok, quiescent;     /* what the next calls return */
+    bool acquire_ok, release_ok, quiescent, full;   /* what the next calls return; full: the queue overruns */
     uint32_t limit_hz, lock_hz;                 /* scanner rate limit; rate locked for the held output */
     bool held, decoder[IDN_SESSION_CHANNELS];
     uint32_t held_gen, last_gen;
@@ -77,7 +77,7 @@ static idn_chunk_result_t fake_enqueue(void *ctx, uint8_t ch, uint32_t gen, cons
     (void)len;
     g.enqueues++;
     if (!g.held || gen != g.held_gen || !g.decoder[ch]) g.violations++;
-    return IDN_CHUNK_OK;
+    return g.full ? IDN_CHUNK_DEVICE_OVERRUN : IDN_CHUNK_OK;
 }
 
 static bool fake_release(void *ctx, uint32_t gen, idn_stop_reason_t reason)
@@ -218,7 +218,7 @@ typedef struct {
     bool      ack_lost;         /* the ACK is not confirmed as sent until a SET(.flush_ack) */
     const uint8_t *req;         /* EV_GROUP payload */
     size_t    req_len;
-    int       acquire_ok, release_ok, quiescent, limit, lock;   /* EV_SET: the fake output from now on */
+    int       acquire_ok, release_ok, quiescent, full, limit, lock;   /* EV_SET: the fake output from now on */
     int64_t   ts_start;         /* EV_SET: every sender's timelines restart here */
     bool      flush_ack;        /* EV_SET: confirm the held-back ACK */
 
@@ -229,7 +229,7 @@ typedef struct {
 
 #define DEFAULTS    .seq = ANY, .result = ANY, .session = ANY, .state = ANY, .iev = ANY, .pev = ANY, .status = ANY, \
                     .mask = ANY, .reason = ANY, .starts = ANY, .breaks = ANY, .acquire_ok = ANY, .release_ok = ANY, \
-                    .quiescent = ANY, .limit = ANY, .lock = ANY, .ts_start = ANY
+                    .quiescent = ANY, .full = ANY, .limit = ANY, .lock = ANY, .ts_start = ANY
 #define RT(...)     { .kind = EV_RT, .cmd = IDN_CMD_RT_CHANNEL_ACK, DEFAULTS, __VA_ARGS__ }
 #define TICK(...)   { .kind = EV_TICK, DEFAULTS, __VA_ARGS__ }
 #define GROUP(p, ...) { .kind = EV_GROUP, .req = (p), .req_len = sizeof(p), DEFAULTS, __VA_ARGS__ }
@@ -406,6 +406,8 @@ static const step_t s_output_busy[] = {
     RT(.msg = OPEN(), .state = IDLE, .pev = PEV(CNLRTED) | PEV(BSYERR), .compiles = 1, .acquires = 1),
     SET(.acquire_ok = 1),
     RT(.msg = WAVE(), .state = PLAYING, .pev = 0, .acquires = 1, .enqueues = 1),
+    SET(.full = 1),                                                          /* the output queue is full */
+    RT(.msg = WAVE(), .iev = IEV(OVERR), .pev = PEV(DVIERR), .breaks = 1, .enqueues = 1),
     END
 };
 
@@ -606,6 +608,7 @@ static bool run(const char *name, const step_t *steps)
                 if (st->acquire_ok != ANY) g.acquire_ok = st->acquire_ok;
                 if (st->release_ok != ANY) g.release_ok = st->release_ok;
                 if (st->quiescent != ANY) g.quiescent = st->quiescent;
+                if (st->full != ANY) g.full = st->full;
                 if (st->limit != ANY) g.limit_hz = (uint32_t)st->limit;
                 if (st->lock != ANY) g.lock_hz = (uint32_t)st->lock;
                 if (st->ts_start != ANY) timelines_start((uint32_t)st->ts_start);
@@ -661,7 +664,7 @@ int main(void)
         { "malformed packets", s_malformed },
         { "truncated configuration", s_truncated_configuration },
         { "missed release deadline", s_release_deadline },
-        { "output held by another producer", s_output_busy },
+        { "output held by another producer, or full", s_output_busy },
         { "client groups", s_client_groups },
         { "sequence wrap, duplicate, late packet", s_sequence },
         { "timestamp wrap, continuity, earlier timestamp", s_timestamps },

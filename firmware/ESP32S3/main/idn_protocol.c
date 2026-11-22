@@ -105,7 +105,7 @@ _Static_assert(IDN_DECODER_CHANNELS == RP_SAMPLE_CHANNELS, "decoder and RP chann
 #define IDN_RX_MAX              1500u           /* larger datagrams are dropped, never truncated */
 #define IDN_FEED_STOP_TIMEOUT_MS 1500u          /* feed exit includes the RP STOP round trip */
 #define IDN_MIN_RATE_HZ         1000u           /* lowest wave rate accepted */
-#define IDN_EPOCH_BLANK_SAMPLES 16u             /* blanked hold on each side of a discontinuity */
+#define IDN_EPOCH_BLANK_SAMPLES 16u             /* blanked hold before a discontinuity, blanked move after it; full-scale steps stay under 1/8 */
 #define IDN_RING_CAPACITY       8192u           /* must be power of 2 */
 #define IDN_FEED_FLUSH_US       100000LL        /* send a partial packet only after the stream idles this long */
 #define IDN_FEED_PREBUFFER      3072u           /* samples queued on the RP before START (~100 ms at 30 kpps) */
@@ -265,6 +265,7 @@ static volatile bool s_device_may_hold = false;
 static rp_sample_t s_last_queued;
 static bool        s_have_last_queued = false;
 static bool        s_lead_in_pending  = false;  /* next chunk starts a new epoch */
+static bool        s_blank_logged     = false;  /* an epoch end was logged in this generation */
 
 static idn_protocol_counters_t s_counters;
 
@@ -531,6 +532,7 @@ static void output_reset(void)
     __atomic_store_n(&s_counters.selected_rate, 0, __ATOMIC_RELAXED);
     s_have_last_queued = false;
     s_lead_in_pending = false;
+    s_blank_logged = false;
 }
 
 /* -- Send helpers ----------------------------------------------------------- */
@@ -647,7 +649,8 @@ static void handle_svcmap_req(const struct sockaddr_in *from,
 }
 
 /* -- Wave chunk processing -------------------------------------------------- */
-static uint32_t ring_write_blank(const rp_sample_t *at, uint32_t n)
+/* n blanked samples moving linearly from `from` to `to`; a hold when they are one point. */
+static uint32_t ring_write_blank(const rp_sample_t *from, const rp_sample_t *to, uint32_t n)
 {
     rp_sample_t blank[IDN_EPOCH_BLANK_SAMPLES];
 
@@ -655,8 +658,8 @@ static uint32_t ring_write_blank(const rp_sample_t *at, uint32_t n)
     for (uint32_t i = 0; i < n; i++) {
         for (int c = 0; c < RP_SAMPLE_CHANNELS; c++)
             blank[i].ch[c] = -32768;    /* every optical line off (raw DAC 0) */
-        blank[i].ch[0] = at->ch[0];
-        blank[i].ch[1] = at->ch[1];
+        for (int c = 0; c < 2; c++)
+            blank[i].ch[c] = (int16_t)(from->ch[c] + (to->ch[c] - from->ch[c]) * (int32_t)(i + 1) / (int32_t)n);
     }
 
     uint32_t w = ring_write(blank, n);
@@ -701,7 +704,7 @@ static idn_chunk_result_t process_wave_chunk(uint8_t ch_id,
     /* A new epoch after earlier output: move there blanked first. */
     if (lead_in) {
         idn_decoder_decode(&ch->layout, samples, 1, &burst[0].ch);
-        ring_write_blank(&burst[0], IDN_EPOCH_BLANK_SAMPLES);
+        ring_write_blank(&s_last_queued, &burst[0], IDN_EPOCH_BLANK_SAMPLES);
     }
     s_lead_in_pending = false;
 
@@ -907,7 +910,9 @@ static void ops_rate_limits(void *ctx, uint32_t gen, idn_rate_policy_t *policy,
 }
 
 /* A continuous epoch ends (blank hold at the last point) or starts (blanked
-   lead-in at its first point, if this output already queued samples). */
+   move from the last queued point to its first, if this output already
+   queued samples). Logged once per output run: chunks the session drops
+   end an epoch too, and a log line is a UART write on the server task. */
 static void ops_wave_epoch(void *ctx, uint8_t ch_id, uint32_t gen, bool start)
 {
     (void)ctx;
@@ -919,8 +924,11 @@ static void ops_wave_epoch(void *ctx, uint8_t ch_id, uint32_t gen, bool start)
     if (start) {
         s_lead_in_pending = true;
     } else if (s_have_last_queued) {
-        ESP_LOGW(TAG, "Channel %u discontinuity; blanked", ch_id);
-        ring_write_blank(&s_last_queued, IDN_EPOCH_BLANK_SAMPLES);
+        if (!s_blank_logged) {
+            ESP_LOGW(TAG, "Channel %u discontinuity; blanked", ch_id);
+            s_blank_logged = true;
+        }
+        ring_write_blank(&s_last_queued, &s_last_queued, IDN_EPOCH_BLANK_SAMPLES);
     }
 }
 

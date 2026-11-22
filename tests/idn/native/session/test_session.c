@@ -262,7 +262,20 @@ static const step_t s_route_then_play[] = {
     RT(.msg = WAVE(.chunk = 0x02), .state = IDLE, .pev = PEV(CKTERR)),       /* frame samples: wrong chunk type */
     RT(.msg = WAVE(.samples = 19), .state = IDLE, .pev = PEV(MCLERR)),       /* too few, before taking the output */
     RT(.msg = WAVE(), .state = PLAYING, .pev = 0, .acquires = 1, .enqueues = 1),
-    RT(.msg = WAVE(), .state = PLAYING, .enqueues = 1),
+    RT(.msg = WAVE(), .state = PLAYING, .enqueues = 1, .starts = 0),
+    RT(.msg = WAVE(.samples = 19), .state = PLAYING, .pev = PEV(MCLERR), .breaks = 1),   /* dropped mid-stream: */
+    RT(.msg = WAVE(), .enqueues = 1, .starts = 1),                           /* the next starts with a blanked move */
+    RT(.msg = WAVE(.chunk = 0x02), .pev = PEV(CKTERR), .breaks = 1),         /* a wrong chunk type */
+    RT(.msg = WAVE(), .enqueues = 1, .starts = 1),
+    RT(.msg = WAVE(.chunk = IDN_CHUNK_WAVE, .samples = 0), .pev = PEV(MCLERR), .breaks = 1),   /* no chunk header */
+    RT(.msg = WAVE(), .enqueues = 1, .starts = 1),
+    RT(.msg = WAVE(.chunk = 0xC0), .pev = PEV(CKTERR), .breaks = 1),         /* a sequel fragment */
+    RT(.msg = WAVE(), .enqueues = 1, .starts = 1),
+    SET(.full = 1),
+    RT(.msg = WAVE(), .pev = PEV(DVIERR), .breaks = 1, .enqueues = 1),       /* no ring room */
+    SET(.full = 0),
+    RT(.msg = WAVE(), .enqueues = 1, .starts = 1),
+    RT(.msg = WAVE(), .enqueues = 1, .starts = 0, .breaks = 0),              /* only the next */
     END
 };
 

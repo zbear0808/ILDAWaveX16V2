@@ -421,6 +421,16 @@ static void end_wave_epochs(idn_session_t *s)
     }
 }
 
+/* A chunk on the channel was not queued: the output has a hole here. Blank
+   across it and let the next chunk start a new epoch; no reconfiguration
+   needed. */
+static void wave_dropped(idn_session_t *s, uint8_t ch)
+{
+    if (s->ch[ch].wave.state == IDN_WAVE_CONTINUOUS) {
+        wave_epoch_break(s, ch, false);
+    }
+}
+
 static void process_data(idn_session_t *s, const idn_msg_t *m, uint64_t ts_us)
 {
     uint8_t ch = m->channel_id;
@@ -449,11 +459,13 @@ static void process_data(idn_session_t *s, const idn_msg_t *m, uint64_t ts_us)
     if (m->chunk_type != IDN_CHUNK_WAVE) {
         pipeline_event(c, IDN_PEV_CKTERR);   /* continuous mode takes wave samples only */
         s->counters.chunk_rejects++;
+        wave_dropped(s, ch);
         return;
     }
 
     if (m->data_len < 4) {
         pipeline_event(c, IDN_PEV_MCLERR);
+        wave_dropped(s, ch);
         return;
     }
 
@@ -474,6 +486,7 @@ static void process_data(idn_session_t *s, const idn_msg_t *m, uint64_t ts_us)
     idn_chunk_result_t r = s->ops.wave_check(s->ops.ctx, ch, m->data, m->data_len, &nsamples);
     if (r != IDN_CHUNK_OK) {
         pipeline_event(c, chunk_result_event(r));
+        wave_dropped(s, ch);
         return;
     }
 
@@ -549,10 +562,8 @@ static void process_data(idn_session_t *s, const idn_msg_t *m, uint64_t ts_us)
     if (r == IDN_CHUNK_OK) {
         idn_wave_commit(&c->wave, ts_us, duration_us);
         idn_rate_commit(&c->rate, nsamples, duration_us);
-    } else if (c->wave.state == IDN_WAVE_CONTINUOUS) {
-        /* Not queued: the output has a hole here. Blank across it and let
-           the next chunk start a new epoch; no reconfiguration needed. */
-        wave_epoch_break(s, ch, false);
+    } else {
+        wave_dropped(s, ch);
     }
 }
 
@@ -577,6 +588,7 @@ static int process_message(idn_session_t *s, const idn_msg_t *m, uint64_t ts_us)
         } else if (c->route == IDN_ROUTE_LASER_CONTINUOUS) {
             pipeline_event(c, IDN_PEV_CKTERR);
             s->counters.chunk_rejects++;
+            wave_dropped(s, ch);
         }
     } else {
         process_data(s, m, ts_us);

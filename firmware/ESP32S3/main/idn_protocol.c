@@ -188,7 +188,8 @@ static inline void wr32(uint8_t *p, uint32_t v)
 /* -- Channel decoders (route and channel state live in idn_session) --------- */
 typedef struct {
     idn_decoder_layout_t layout;        /* invalid until a configuration compiles */
-    idn_decoder_reason_t last_reject;   /* logged once per change */
+    idn_decoder_reason_t config_reject; /* each logged once per change of its own reason */
+    idn_decoder_reason_t chunk_reject;
 } idn_channel_decoder_t;
 
 _Static_assert(IDN_MAX_CHANNELS == IDN_SESSION_CHANNELS, "decoder and session channel counts differ");
@@ -348,11 +349,11 @@ static rp_sample_t s_feed_stage[RP_STREAM_SAMPLES_PER_PACKET];
 /* -- Decoder ---------------------------------------------------------------- */
 static idn_decoder_caps_t s_decoder_caps;
 
-static void log_decoder_reject(uint8_t ch_id, idn_channel_decoder_t *ch, const char *what,
+static void log_decoder_reject(uint8_t ch_id, idn_decoder_reason_t *last, const char *what,
                                idn_decoder_result_t r)
 {
-    if (ch->last_reject == r.reason) return;
-    ch->last_reject = r.reason;
+    if (*last == r.reason) return;
+    *last = r.reason;
     ESP_LOGW(TAG, "Channel %u %s rejected: %s (%s), tag 0x%04X at word %u",
              ch_id, what, idn_decoder_status_name(r.status), idn_decoder_reason_name(r.reason),
              r.tag, r.tag_index);
@@ -778,19 +779,19 @@ static idn_cfg_result_t ops_config_compile(void *ctx, uint8_t ch_id, uint8_t mod
 
     switch (r.status) {
         case IDN_DECODER_OK:
-            if (ch->last_reject != IDN_DECODER_REASON_NONE)
+            if (ch->config_reject != IDN_DECODER_REASON_NONE)
                 ESP_LOGI(TAG, "Channel %u configuration accepted", ch_id);
-            ch->last_reject = IDN_DECODER_REASON_NONE;
+            ch->config_reject = IDN_DECODER_REASON_NONE;
             ESP_LOGI(TAG, "Channel %u routed, %u bytes/sample", ch_id, ch->layout.stride);
             return IDN_CFG_OK;
         case IDN_DECODER_ERR_UNSUPPORTED:
-            log_decoder_reject(ch_id, ch, "configuration", r);
+            log_decoder_reject(ch_id, &ch->config_reject, "configuration", r);
             return IDN_CFG_UNSUPPORTED;
         case IDN_DECODER_ERR_RESOURCE:
-            log_decoder_reject(ch_id, ch, "configuration", r);
+            log_decoder_reject(ch_id, &ch->config_reject, "configuration", r);
             return IDN_CFG_NO_RESOURCES;
         default:
-            log_decoder_reject(ch_id, ch, "configuration", r);
+            log_decoder_reject(ch_id, &ch->config_reject, "configuration", r);
             return IDN_CFG_INVALID;
     }
 }
@@ -816,7 +817,7 @@ static idn_chunk_result_t ops_wave_check(void *ctx, uint8_t ch_id,
         return IDN_CHUNK_OK;
     }
 
-    log_decoder_reject(ch_id, ch, "wave chunk", r);
+    log_decoder_reject(ch_id, &ch->chunk_reject, "wave chunk", r);
 
     switch (r.reason) {
         case IDN_DECODER_REASON_CHUNK_HEADER:

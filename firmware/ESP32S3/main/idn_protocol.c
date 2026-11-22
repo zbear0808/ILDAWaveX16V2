@@ -247,11 +247,13 @@ static const char *TAG = "idn";
 
 /*
    Output rate (plan 03). The server task proposes the rate of the samples
-   queued for the current output generation; the feed applies it once, just
-   before START, and it stays locked for that generation. 0 = none.
+   queued for the current output generation, with their rate envelope; the
+   feed applies it once, just before START, and it stays locked for that
+   generation. hz 0 = none. Both tasks access them under s_rate_mux.
 */
-static volatile uint32_t s_proposed_rate = 0;
-static volatile uint32_t s_locked_rate   = 0;
+static portMUX_TYPE      s_rate_mux      = portMUX_INITIALIZER_UNLOCKED;
+static idn_rate_lock_t   s_proposed_rate;
+static idn_rate_lock_t   s_locked_rate;
 static uint32_t          s_rp_max_rate   = 0;   /* RP's own limit when the output was taken; 0 = none */
 
 /* Set once the feed has handed samples to the RP in this output run. No
@@ -286,17 +288,27 @@ static idn_rate_policy_t rate_policy(void)
 */
 static bool feed_output_start(void)
 {
-    uint32_t rate = __atomic_load_n(&s_proposed_rate, __ATOMIC_ACQUIRE);
-    uint32_t applied = rate;
+    idn_rate_lock_t lock;
 
-    if (rate == 0 || rp_manager_set_rate_applied(rate, &applied) != ESP_OK) {
+    portENTER_CRITICAL(&s_rate_mux);
+    lock = s_proposed_rate;
+    portEXIT_CRITICAL(&s_rate_mux);
+    uint32_t applied = lock.hz;
+
+    if (lock.hz == 0 || rp_manager_set_rate_applied(lock.hz, &applied) != ESP_OK) {
         return false;
     }
-    if (applied != rate) {
+    if (applied != lock.hz) {
         ESP_LOGW(TAG, "Asked %lu pps, RP runs %lu; chunks at %lu will be rejected",
-                 (unsigned long)rate, (unsigned long)applied, (unsigned long)rate);
+                 (unsigned long)lock.hz, (unsigned long)applied, (unsigned long)lock.hz);
+        /* The RP clamped the rate: clamp its envelope too. */
+        lock.hz = applied;
+        if (lock.min_hz > applied) lock.min_hz = applied;
+        if (lock.max_hz > applied) lock.max_hz = applied;
     }
-    __atomic_store_n(&s_locked_rate, applied, __ATOMIC_RELEASE);
+    portENTER_CRITICAL(&s_rate_mux);
+    s_locked_rate = lock;
+    portEXIT_CRITICAL(&s_rate_mux);
     __atomic_store_n(&s_counters.selected_rate, applied, __ATOMIC_RELAXED);
 
     rp_manager_output_start();
@@ -511,8 +523,10 @@ static bool feed_poll_stopped(void)
 static void output_reset(void)
 {
     ring_clear();
-    __atomic_store_n(&s_proposed_rate, 0, __ATOMIC_RELEASE);
-    __atomic_store_n(&s_locked_rate, 0, __ATOMIC_RELEASE);
+    portENTER_CRITICAL(&s_rate_mux);
+    memset(&s_proposed_rate, 0, sizeof(s_proposed_rate));
+    memset(&s_locked_rate, 0, sizeof(s_locked_rate));
+    portEXIT_CRITICAL(&s_rate_mux);
     __atomic_store_n(&s_counters.selected_rate, 0, __ATOMIC_RELAXED);
     s_have_last_queued = false;
     s_lead_in_pending = false;
@@ -716,7 +730,10 @@ static idn_chunk_result_t process_wave_chunk(uint8_t ch_id,
     idn_rate_epoch_t epoch = s_session.ch[ch_id].rate;
     idn_rate_policy_t policy = rate_policy();
     idn_rate_commit(&epoch, nsamples, duration_us);
-    __atomic_store_n(&s_proposed_rate, idn_rate_select(&policy, &epoch), __ATOMIC_RELEASE);
+    idn_rate_lock_t proposal = idn_rate_lock(&policy, &epoch);
+    portENTER_CRITICAL(&s_rate_mux);
+    s_proposed_rate = proposal;
+    portEXIT_CRITICAL(&s_rate_mux);
 
     uint64_t mhz = idn_rate_requested_mhz(&epoch);
     __atomic_store_n(&s_counters.requested_rate_mhz,
@@ -868,7 +885,7 @@ static bool ops_output_quiescent(void *ctx)
 }
 
 static void ops_rate_limits(void *ctx, uint32_t gen, idn_rate_policy_t *policy,
-                            uint32_t *locked_hz)
+                            idn_rate_lock_t *lock)
 {
     (void)ctx;
 
@@ -880,8 +897,12 @@ static void ops_rate_limits(void *ctx, uint32_t gen, idn_rate_policy_t *policy,
     }
 
     *policy = rate_policy();
-    *locked_hz = (gen != 0 && gen == s_output_gen)
-                     ? __atomic_load_n(&s_locked_rate, __ATOMIC_ACQUIRE) : 0;
+    memset(lock, 0, sizeof(*lock));
+    if (gen != 0 && gen == s_output_gen) {
+        portENTER_CRITICAL(&s_rate_mux);
+        *lock = s_locked_rate;
+        portEXIT_CRITICAL(&s_rate_mux);
+    }
 }
 
 /* A continuous epoch ends (blank hold at the last point) or starts (blanked

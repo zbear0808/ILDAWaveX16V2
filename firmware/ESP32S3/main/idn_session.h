@@ -186,11 +186,11 @@ typedef struct {
     /* After a missed release deadline: has the producer stopped since? */
     bool (*output_quiescent)(void *ctx);
 
-    /* Plan 03. rate_limits: the scanner rate policy, and the rate already
-       applied to output generation gen (0 = gen not held or none locked).
+    /* Plan 03. rate_limits: the scanner rate policy, and the rate locked for
+       output generation gen (hz 0 = gen not held or none locked).
        NULL: wave chunk rates are not checked. */
     void (*rate_limits)(void *ctx, uint32_t gen, idn_rate_policy_t *policy,
-                        uint32_t *locked_hz);
+                        idn_rate_lock_t *lock);
     /* Plan 03. A continuous epoch on the channel under output generation gen
        starts with the next enqueue (start), or has just ended (!start): the
        server blanks across the boundary. */

@@ -481,10 +481,11 @@ static void process_data(idn_session_t *s, const idn_msg_t *m, uint64_t ts_us)
     /* One stable rate per output run; never retime queued samples. */
     if (s->ops.rate_limits) {
         idn_rate_policy_t policy;
-        uint32_t locked = 0;
+        idn_rate_lock_t lock;
         memset(&policy, 0, sizeof(policy));
-        s->ops.rate_limits(s->ops.ctx, s->output_held ? s->output_gen : 0, &policy, &locked);
-        if (idn_rate_check(&policy, &c->rate, nsamples, duration_us, locked) != IDN_RATE_OK) {
+        memset(&lock, 0, sizeof(lock));
+        s->ops.rate_limits(s->ops.ctx, s->output_held ? s->output_gen : 0, &policy, &lock);
+        if (idn_rate_check(&policy, &c->rate, nsamples, duration_us, &lock) != IDN_RATE_OK) {
             pipeline_event(c, IDN_PEV_RGUERR);
             s->counters.rate_rejects++;
             if (!epoch_start) {

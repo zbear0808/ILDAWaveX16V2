@@ -96,13 +96,13 @@ static bool fake_quiescent(void *ctx)
     return g.quiescent;
 }
 
-static void fake_rate_limits(void *ctx, uint32_t gen, idn_rate_policy_t *policy, uint32_t *locked_hz)
+static void fake_rate_limits(void *ctx, uint32_t gen, idn_rate_policy_t *policy, idn_rate_lock_t *lock)
 {
     (void)ctx;
     policy->min_hz = 1000;
     policy->limit_hz = g.limit_hz;
     policy->resolution_us = 1;
-    *locked_hz = gen != 0 && g.held && gen == g.held_gen ? g.lock_hz : 0;
+    lock->hz = lock->min_hz = lock->max_hz = gen != 0 && g.held && gen == g.held_gen ? g.lock_hz : 0;
 }
 
 static void fake_wave_epoch(void *ctx, uint8_t ch, uint32_t gen, bool start)

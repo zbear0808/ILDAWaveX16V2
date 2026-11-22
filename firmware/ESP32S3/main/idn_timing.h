@@ -256,13 +256,13 @@ bool idn_wave_verdict_is_error(idn_wave_verdict_t v);
  *     limit_hz (idn_rate_select), and the most an accepted stream can be
  *     slowed is its own quantization uncertainty, 1 us per chunk.
  *   - Chunk envelope disjoint from the epoch envelope, or (once the output
- *     rate is locked) not within 1 Hz of the locked rate: CHANGED. Changes
- *     smaller than the quantization envelope cannot be told apart from
- *     rounding and are accepted.
+ *     rate is locked) from the lock's envelope widened by 1 Hz: CHANGED.
+ *     Changes smaller than the quantization envelope cannot be told apart
+ *     from rounding and are accepted.
  *
  * Project policy (first-release fallback): one stable rate per continuous
  * output run. The output rate is selected once, before output starts, from
- * the epoch estimate (idn_rate_select) and is never changed at receive time,
+ * the epoch estimate (idn_rate_lock) and is never changed at receive time,
  * because a RATE command retimes every sample already queued. A genuine
  * in-stream rate change is rejected (RGUErr) instead of being played at the
  * old rate or rescheduled. Quantization alternation is not a rate change.
@@ -279,6 +279,17 @@ typedef struct {
     uint64_t chunks;        /* k: chunks they came in */
 } idn_rate_epoch_t;
 
+/*
+   The output rate locked for a run, and the envelope of the queued samples
+   it was selected from, N * 1e6 / (D +/- k * resolution_us); all three
+   clamped to [min_hz, limit_hz] like idn_rate_select. hz == 0: not locked.
+*/
+typedef struct {
+    uint32_t hz;            /* the rate output plays at */
+    uint32_t min_hz;
+    uint32_t max_hz;
+} idn_rate_lock_t;
+
 typedef enum {
     IDN_RATE_OK = 0,
     IDN_RATE_INVALID,
@@ -288,13 +299,15 @@ typedef enum {
 } idn_rate_verdict_t;
 
 void idn_rate_reset(idn_rate_epoch_t *e);
-/* locked_hz: output rate already applied for this run, or 0 if none yet. */
+/* lock: the rate already applied for this run; NULL or hz 0 if none yet. */
 idn_rate_verdict_t idn_rate_check(const idn_rate_policy_t *p, const idn_rate_epoch_t *e,
                                   uint32_t samples, uint32_t duration_us,
-                                  uint32_t locked_hz);
+                                  const idn_rate_lock_t *lock);
 void idn_rate_commit(idn_rate_epoch_t *e, uint32_t samples, uint32_t duration_us);
 /* Nearest integer rate for the epoch, clamped to [min_hz, limit_hz]; 0 if empty. */
 uint32_t idn_rate_select(const idn_rate_policy_t *p, const idn_rate_epoch_t *e);
+/* Lock the epoch: idn_rate_select() and the epoch's envelope; all 0 if empty. */
+idn_rate_lock_t idn_rate_lock(const idn_rate_policy_t *p, const idn_rate_epoch_t *e);
 /* Requested epoch rate in millihertz, for diagnostics; 0 if empty. */
 uint64_t idn_rate_requested_mhz(const idn_rate_epoch_t *e);
 

@@ -273,7 +273,7 @@ void idn_rate_reset(idn_rate_epoch_t *e)
 
 idn_rate_verdict_t idn_rate_check(const idn_rate_policy_t *p, const idn_rate_epoch_t *e,
                                   uint32_t samples, uint32_t duration_us,
-                                  uint32_t locked_hz)
+                                  const idn_rate_lock_t *lock)
 {
     if (samples == 0 || duration_us == 0) {
         return IDN_RATE_INVALID;
@@ -311,12 +311,12 @@ idn_rate_verdict_t idn_rate_check(const idn_rate_policy_t *p, const idn_rate_epo
         }
     }
 
-    if (locked_hz != 0) {
-        /* Chunk envelope must reach within 1 Hz of the locked output rate. */
-        if (prod_less((uint64_t)locked_hz + 1u, d + q, n, US_PER_S)) {
+    if (lock != NULL && lock->hz != 0) {
+        /* Chunk envelope must reach the lock's envelope widened by 1 Hz. */
+        if (prod_less((uint64_t)lock->max_hz + 1u, d + q, n, US_PER_S)) {
             return IDN_RATE_CHANGED;
         }
-        if (d > q && prod_less(n, US_PER_S, (uint64_t)locked_hz - 1u, d - q)) {
+        if (d > q && lock->min_hz != 0 && prod_less(n, US_PER_S, (uint64_t)lock->min_hz - 1u, d - q)) {
             return IDN_RATE_CHANGED;
         }
     }
@@ -337,16 +337,35 @@ void idn_rate_commit(idn_rate_epoch_t *e, uint32_t samples, uint32_t duration_us
     }
 }
 
+static uint32_t clamp_hz(const idn_rate_policy_t *p, uint64_t hz)
+{
+    if (hz > p->limit_hz) hz = p->limit_hz;
+    if (hz < p->min_hz)   hz = p->min_hz;
+    return (uint32_t)hz;
+}
+
 uint32_t idn_rate_select(const idn_rate_policy_t *p, const idn_rate_epoch_t *e)
 {
     if (e->samples == 0 || e->duration_us == 0) {
         return 0;
     }
 
-    uint64_t hz = (e->samples * US_PER_S + e->duration_us / 2u) / e->duration_us;
-    if (hz > p->limit_hz) hz = p->limit_hz;
-    if (hz < p->min_hz)   hz = p->min_hz;
-    return (uint32_t)hz;
+    return clamp_hz(p, (e->samples * US_PER_S + e->duration_us / 2u) / e->duration_us);
+}
+
+idn_rate_lock_t idn_rate_lock(const idn_rate_policy_t *p, const idn_rate_epoch_t *e)
+{
+    idn_rate_lock_t l = { idn_rate_select(p, e), 0, 0 };
+
+    if (l.hz != 0) {
+        /* N / (D + kq) .. N / (D - kq), rounded outwards; unbounded above once D <= kq. */
+        uint64_t n = e->samples * US_PER_S;
+        uint64_t eq = e->chunks * p->resolution_us;
+        uint64_t short_d = e->duration_us > eq ? e->duration_us - eq : 0;
+        l.min_hz = clamp_hz(p, n / (e->duration_us + eq));
+        l.max_hz = clamp_hz(p, short_d ? (n + short_d - 1u) / short_d : UINT64_MAX);
+    }
+    return l;
 }
 
 uint64_t idn_rate_requested_mhz(const idn_rate_epoch_t *e)

@@ -197,6 +197,7 @@ static void test_wave(void)
 static const idn_rate_policy_t P = { 1000, 30000, 1 };     /* min 1 kHz, limit 30 kHz, 1 us */
 #define D(...) ((const uint32_t[]){ __VA_ARGS__, 0 })
 #define R(n, d, locked, verdict) { n, d, locked, IDN_RATE_##verdict }
+#define LK(limit, n0, d0, n1, d1, hz, verdict) { limit, n0, d0, n1, d1, hz, IDN_RATE_##verdict }
 
 /* As a caller does: check and commit up to `chunks` chunks of n samples, durations cycling
    through the zero-terminated d[], stopping at the first one rejected. Returns how many passed. */
@@ -234,17 +235,41 @@ static void test_rate(void)
         { 20, D(667, 666, 667), minute, 30000 },        /* 30 kpps in 20-sample chunks */
         { 20, D(666, 665), 1, 30000 },                  /* 30,050 pps: one chunk fits, two do not */
     };
+    /* 154 chunks of one size (3,080 samples: what the feed queues before START) lock the rate; then
+       a chunk of another size, in the same epoch and in a new one. Each chunk is truncated or rounded
+       on its own: limit, first chunks, later chunk, locked rate, verdict. */
+    static const struct { uint32_t limit, n0, d0, n1, d1, hz; idn_rate_verdict_t v; } lock[] = {
+        LK(40000, 20, 666, 166, 5533, 30030, OK),       /* 30 kpps truncated, under a 40 kpps limit */
+        LK(30000, 20, 833, 166, 6916, 24010, OK),       /* 24 kpps truncated */
+        LK(30000, 20, 667, 166, 5533, 29985, OK),       /* 30 kpps rounded */
+        LK(40000, 20, 666, 166, 5514, 30030, CHANGED),  /* then 30,100 pps */
+        LK(40000, 20, 666, 166, 5551, 30030, CHANGED),  /* then 29,900 pps */
+    };
     idn_rate_epoch_t e;
 
     idn_rate_reset(&e);
-    for (size_t i = 0; i < N(one); i++)
-        EQ_AT(i, idn_rate_check(&P, &e, one[i].n, one[i].d, one[i].locked), one[i].v);
+    for (size_t i = 0; i < N(one); i++) {
+        const idn_rate_lock_t point = { one[i].locked, one[i].locked, one[i].locked };
+        EQ_AT(i, idn_rate_check(&P, &e, one[i].n, one[i].d, &point), one[i].v);
+    }
     EQ(idn_rate_select(&P, &e), 0);                     /* nothing committed: no rate */
     EQ(idn_rate_requested_mhz(&e), 0);
     for (size_t i = 0; i < N(sender); i++) {
         idn_rate_reset(&e);
         EQ_AT(i, feed(&e, sender[i].n, sender[i].d, minute), sender[i].accepted);
         EQ_AT(i, idn_rate_select(&P, &e), sender[i].hz);
+    }
+    for (size_t i = 0; i < N(lock); i++) {
+        const idn_rate_policy_t p = { 1000, lock[i].limit, 1 };
+        idn_rate_epoch_t fresh;
+        idn_rate_reset(&e);
+        idn_rate_reset(&fresh);
+        for (int k = 0; k < 154; k++)
+            idn_rate_commit(&e, lock[i].n0, lock[i].d0);
+        const idn_rate_lock_t lk = idn_rate_lock(&p, &e);
+        EQ_AT(i, lk.hz, lock[i].hz);
+        EQ_AT(i, idn_rate_check(&p, &e, lock[i].n1, lock[i].d1, &lk), lock[i].v);
+        EQ_AT(i, idn_rate_check(&p, &fresh, lock[i].n1, lock[i].d1, &lk), lock[i].v);
     }
 
     /* After 100 chunks at 20 kpps a genuine change is CHANGED, up or down; 1 us either way is not. */

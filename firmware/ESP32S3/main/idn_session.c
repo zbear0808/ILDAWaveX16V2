@@ -159,6 +159,7 @@ static void new_route_gen(idn_channel_t *c)
     c->route_gen++;
     idn_wave_reset(&c->wave);
     idn_rate_reset(&c->rate);
+    idn_rate_reset(&c->prior);
 }
 
 static bool output_fault_cleared(idn_session_t *s)
@@ -241,6 +242,7 @@ static void close_channel(idn_session_t *s, uint8_t ch, idn_stop_reason_t reason
     c->sdm = 0;
     idn_wave_reset(&c->wave);
     idn_rate_reset(&c->rate);
+    idn_rate_reset(&c->prior);
 }
 
 static void close_connection(idn_session_t *s, idn_stop_reason_t reason)
@@ -490,6 +492,9 @@ static void process_data(idn_session_t *s, const idn_msg_t *m, uint64_t ts_us)
 
     bool epoch_start = wv == IDN_WAVE_START || wv == IDN_WAVE_RESTART;
     if (epoch_start) {
+        if (c->prior.samples == 0) {
+            c->prior = c->rate;     /* the epoch that ended, if this run has one */
+        }
         idn_rate_reset(&c->rate);
     }
 
@@ -500,6 +505,10 @@ static void process_data(idn_session_t *s, const idn_msg_t *m, uint64_t ts_us)
         memset(&policy, 0, sizeof(policy));
         memset(&lock, 0, sizeof(lock));
         s->ops.rate_limits(s->ops.ctx, s->output_held ? s->output_gen : 0, &policy, &lock);
+        if (lock.hz == 0 && c->prior.samples != 0) {
+            /* Not started: an earlier epoch's queued samples keep their rate. */
+            lock = idn_rate_lock(&policy, &c->prior);
+        }
         if (idn_rate_check(&policy, &c->rate, nsamples, duration_us, &lock) != IDN_RATE_OK) {
             pipeline_event(c, IDN_PEV_RGUERR);
             s->counters.rate_rejects++;

@@ -228,6 +228,7 @@ typedef struct {
     idn_event_latch_t   pipeline;           /* pipeline events since the last sent ACK */
     idn_wave_timeline_t wave;               /* plan 03: wave continuity */
     idn_rate_epoch_t    rate;               /* plan 03: rate of the current epoch */
+    idn_rate_epoch_t    prior;              /* plan 03: an earlier epoch of this output run */
 } idn_channel_t;
 
 /* Plan 03 receiver counters, since boot; written by the session only. */

@@ -474,6 +474,8 @@ static const step_t s_rate[] = {
     RT(.msg = WAVE(.duration = 400), .pev = PEV(RGUERR), .breaks = 1),       /* 50 kpps: refused, not slowed */
     RT(.msg = WAVE(.duration = 667), .pev = PEV(CTYERR)),
     RT(.msg = ROUTE(), .pev = 0),
+    RT(.msg = WAVE(.duration = 800), .pev = PEV(RGUERR), .starts = 0),       /* 25 kpps before START: refused */
+    RT(.msg = WAVE(.duration = 800), .pev = PEV(RGUERR), .starts = 0),       /* while the 30 kpps ones still wait */
     SET(.lock = 30000),                                                      /* the output now runs at 30 kpps */
     RT(.msg = WAVE(.duration = 800), .pev = PEV(RGUERR), .starts = 0, .breaks = 0),   /* 25 kpps: a real change */
     RT(.msg = WAVE(.duration = 667), .pev = 0, .starts = 1, .enqueues = 1),

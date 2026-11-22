@@ -89,6 +89,7 @@ _Static_assert(IDN_DECODER_CHANNELS == RP_SAMPLE_CHANNELS, "decoder and RP chann
 #define IDN_RING_CAPACITY       8192u           /* must be power of 2 */
 #define IDN_FEED_FLUSH_US       100000LL        /* send a partial packet only after the stream idles this long */
 #define IDN_FEED_PREBUFFER      3072u           /* samples queued on the RP before START (~100 ms at 30 kpps) */
+#define IDN_SPLICE_BLANK_SAMPLES 16u            /* blanked move into a chunk queued after a dropped one; full-scale steps stay under 1/8 */
 #define IDN_MAX_CHANNELS        64
 #define STACK_SERVER            8192u
 #define STACK_FEED              4096u
@@ -212,6 +213,7 @@ static inline void wr32(uint8_t *p, uint32_t v)
 typedef struct {
     bool                 open;
     uint8_t              service_mode;
+    bool                 splice;        /* a chunk was not queued: blank the move into the next one */
     idn_decoder_layout_t layout;        /* invalid until a configuration compiles */
     idn_decoder_reason_t last_reject;   /* logged once per change */
 } idn_channel_t;
@@ -224,6 +226,8 @@ typedef struct {
 static rp_sample_t       *s_ring      = NULL;
 static volatile uint32_t  s_ring_head = 0;
 static volatile uint32_t  s_ring_tail = 0;
+static rp_sample_t        s_ring_last;            /* last sample queued; valid when s_ring_has_last */
+static bool               s_ring_has_last = false;
 static uint32_t           s_applied_rate = 0;     /* rate the RP runs */
 static uint32_t           s_requested_rate = 0;   /* rate the sender's chunks imply */
 
@@ -249,6 +253,10 @@ static uint32_t ring_write(const rp_sample_t *pts, uint32_t n)
     for (uint32_t i = 0; i < n; i++)
         s_ring[(tail + i) & mask] = pts[i];
     __atomic_store_n(&s_ring_tail, (tail + n) % wrap, __ATOMIC_RELEASE);
+    if (n > 0) {
+        s_ring_last     = pts[n - 1];
+        s_ring_has_last = true;
+    }
     return n;
 }
 
@@ -265,7 +273,7 @@ static uint32_t ring_read(rp_sample_t *out, uint32_t n)
     return n;
 }
 
-static void ring_clear(void) { s_ring_head = 0; s_ring_tail = 0; }
+static void ring_clear(void) { s_ring_head = 0; s_ring_tail = 0; s_ring_has_last = false; }
 
 static const char *TAG = "idn";
 
@@ -649,6 +657,7 @@ static void process_wave_chunk(uint8_t ch_id,
     /* No auto-open and no default layout: data needs a routed channel whose configuration compiled. */
     if (!ch->open || !ch->layout.valid) {
         ESP_LOGD(TAG, "Wave chunk on channel %u without accepted configuration dropped", ch_id);
+        ch->splice = true;
         return;
     }
 
@@ -658,6 +667,7 @@ static void process_wave_chunk(uint8_t ch_id,
                                                           &nsamples, &duration_us);
     if (r.status != IDN_DECODER_OK) {
         log_decoder_reject(ch_id, ch, "wave chunk", r);
+        ch->splice = true;
         return;
     }
 
@@ -668,14 +678,32 @@ static void process_wave_chunk(uint8_t ch_id,
     uint32_t rate = (uint32_t)((uint64_t)nsamples * 1000000ULL / duration_us);
     apply_sample_rate(rate);
 
-    /* Queue the whole chunk or none of it; this task is the only producer. */
-    if (nsamples > ring_free()) {
+    /* After a chunk that was not queued, this one starts with a blanked move from the last queued point. */
+    uint32_t lead = (ch->splice && s_ring_has_last) ? IDN_SPLICE_BLANK_SAMPLES : 0u;
+
+    /* Queue the whole chunk, with its move, or none of it; this task is the only producer. */
+    if (nsamples + lead > ring_free()) {
         protocol_stream_stats_add_dropped(PROTOCOL_STREAM_IDN, nsamples);
+        ch->splice = true;
         return;
     }
+    ch->splice = false;
 
     rp_sample_t burst[64];
     uint32_t    written  = 0;
+
+    if (lead > 0) {
+        rp_sample_t first, m;
+        idn_decoder_decode(&ch->layout, samples, 1, &first.ch);
+        int32_t x0 = s_ring_last.ch[0], y0 = s_ring_last.ch[1];
+        for (int c = 2; c < RP_SAMPLE_CHANNELS; c++)
+            m.ch[c] = -32768;
+        for (uint32_t k = 1; k <= lead; k++) {
+            m.ch[0] = (int16_t)(x0 + (first.ch[0] - x0) * (int32_t)k / (int32_t)lead);
+            m.ch[1] = (int16_t)(y0 + (first.ch[1] - y0) * (int32_t)k / (int32_t)lead);
+            written += ring_write(&m, 1);
+        }
+    }
 
     for (uint32_t s = 0; s < nsamples; ) {
         uint32_t n = nsamples - s;

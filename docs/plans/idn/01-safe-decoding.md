@@ -7,7 +7,7 @@ Status: software increments 1-3 and the rejection half of increment 4 implemente
 Implemented:
 
 - Pure-C decoder `firmware/ESP32S3/main/idn_decoder.c/.h`: transactional layout compilation with typed results (malformed / unsupported / invalid config / invalid samples / resource, plus reason and offending tag), whole-chunk validation, and sample decoding. The header records every policy choice below.
-- `idn_protocol.c`: default layout, auto-open and SCWC shortening removed. A truncated configuration invalidates the channel's decoder; a rejected replacement leaves the channel without a decoder; wave chunks are checked as a whole before rate update or enqueue, and are queued whole or dropped (counted).
+- `idn_protocol.c`: default layout, auto-open and SCWC shortening removed. A truncated configuration invalidates the channel's decoder; a rejected replacement leaves the channel without a decoder; wave chunks are checked as a whole before rate update or enqueue, and are queued whole or dropped (counted). After a chunk that was not queued, the channel's next queued chunk starts with a 16-sample blanked move from the last queued point.
 - Unassigned outputs (U1/U2, and I when no intensity line) are `INT16_MIN` (raw DAC 0); previously U1/U2 were signed 0 (mid-scale).
 
 Policy decisions:

@@ -5,7 +5,7 @@
  *
  * Order for one RT packet:
  *   1. Bounds-check the message (no state touched on failure).
- *   2. Client group, abort, connection identity / allocation.
+ *   2. Client group, Stop hold, abort, connection identity / allocation.
  *   3. Sequence (idn_timing, plan 03): duplicate, late and stale packets
  *      stop here; only then is the link timeout refreshed.
  *   4. Message timestamp chronology (plan 03): an earlier one is dropped.
@@ -247,7 +247,7 @@ static void close_channel(idn_session_t *s, uint8_t ch, idn_stop_reason_t reason
 
 static void close_connection(idn_session_t *s, idn_stop_reason_t reason)
 {
-    if (s->state != IDN_SESSION_ACTIVE) {
+    if (s->state != IDN_SESSION_ACTIVE && s->state != IDN_SESSION_HELD) {
         return;
     }
 
@@ -669,7 +669,7 @@ void idn_session_rt(idn_session_t *s, int64_t now_us, const idn_endpoint_t *from
     out->send_ack = ack_req;
 
     /* Abort carries no payload; it is acted on whatever follows the header. */
-    idn_msg_t msg;
+    idn_msg_t msg = { 0 };
     bool has_msg = !is_abort && payload_len > 0;
     if (has_msg && !idn_session_parse_message(payload, payload_len, &msg)) {
         s->counters.malformed++;
@@ -694,6 +694,29 @@ void idn_session_rt(idn_session_t *s, int64_t now_us, const idn_endpoint_t *from
         return;
     }
 
+    bool routed = has_msg && msg.has_cfg && msg.routing;
+
+    /*
+       A local Stop holds its sender, which was not told: its packets keep
+       the link alive and play nothing until it closes, aborts or times out.
+       Its host routing from a new port is still that sender: the hold moves
+       there (as a connection would, below).
+    */
+    if (s->state == IDN_SESSION_HELD &&
+        (endpoint_eq(&s->peer, from) || (routed && same_host(&s->peer, from)))) {
+        s->peer = *from;
+        s->last_rt_us = now_us;
+        if (is_close || is_abort) {
+            close_connection(s, is_abort ? IDN_STOP_ABORT : IDN_STOP_GRACEFUL);
+            out->connection_closed = true;
+        }
+        plain_result(out, IDN_RESULT_OK);
+        if (ack_req && has_msg && msg.channel_msg) {
+            out->ack.pipeline_events = IDN_PEV_CNLCLSD;
+        }
+        return;
+    }
+
     bool match = s->state == IDN_SESSION_ACTIVE && endpoint_eq(&s->peer, from);
 
     if (is_abort) {
@@ -713,8 +736,7 @@ void idn_session_rt(idn_session_t *s, int64_t now_us, const idn_endpoint_t *from
         }
         /* The session's host routing a channel from a new source port: its
            sender on a new socket. The connection moves there (plan 03). */
-        bool moved = s->state == IDN_SESSION_ACTIVE && has_msg && msg.has_cfg && msg.routing &&
-                     same_host(&s->peer, from);
+        bool moved = s->state == IDN_SESSION_ACTIVE && routed && same_host(&s->peer, from);
         if (s->state != IDN_SESSION_FREE && !moved) {
             plain_result(out, IDN_RESULT_OCCUPIED);
             return;
@@ -800,7 +822,7 @@ void idn_session_ack_sent(idn_session_t *s, const idn_rt_outcome_t *out)
 
 void idn_session_tick(idn_session_t *s, int64_t now_us)
 {
-    if (s->state == IDN_SESSION_ACTIVE &&
+    if ((s->state == IDN_SESSION_ACTIVE || s->state == IDN_SESSION_HELD) &&
         now_us - s->last_rt_us >= IDN_SESSION_LINK_TIMEOUT_US) {
         close_connection(s, IDN_STOP_TIMEOUT);
     }
@@ -812,7 +834,15 @@ void idn_session_tick(idn_session_t *s, int64_t now_us)
 
 void idn_session_cancel(idn_session_t *s, idn_stop_reason_t reason)
 {
+    if (s->state != IDN_SESSION_ACTIVE) {
+        return;
+    }
+
+    /* Keep the sender's identity and link time for the hold (see idn_session_rt). */
+    idn_endpoint_t peer = s->peer;
     close_connection(s, reason);
+    s->peer = peer;
+    s->state = IDN_SESSION_HELD;
 }
 
 void idn_session_group_request(idn_session_t *s, const uint8_t *payload,

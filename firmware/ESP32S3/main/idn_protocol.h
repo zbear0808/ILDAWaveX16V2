@@ -30,8 +30,8 @@ esp_err_t idn_protocol_start(void);
  * @brief Close any IDN connection and stop its output (local Stop).
  *
  * Served by the IDN server task; waits until the feed task has
- * acknowledged its exit. A sender that keeps streaming opens a new
- * connection and plays again once it re-routes its channel.
+ * acknowledged its exit. The stopped sender's packets then play nothing,
+ * and other senders are refused, until it closes or its link times out.
  *
  * @return ESP_OK when no IDN output remains, ESP_ERR_TIMEOUT otherwise.
  */

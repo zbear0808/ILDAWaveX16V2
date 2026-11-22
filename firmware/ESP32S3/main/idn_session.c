@@ -353,6 +353,10 @@ static void process_data(idn_session_t *s, const idn_msg_t *m)
         return;
     }
 
+    /* Set until a chunk is queued: after a dropped one, the next starts with a blanked move. */
+    bool splice = c->splice;
+    c->splice = true;
+
     if (c->state == IDN_CHANNEL_CLOSED) {
         s->input_events |= IDN_IEV_CCERR;   /* never auto-open */
         return;
@@ -425,7 +429,8 @@ static void process_data(idn_session_t *s, const idn_msg_t *m)
 
     c->state = IDN_CHANNEL_ROUTED_ACTIVE;
 
-    r = s->ops.wave_enqueue(s->ops.ctx, ch, s->output_gen, m->data, m->data_len);
+    r = s->ops.wave_enqueue(s->ops.ctx, ch, s->output_gen, splice, m->data, m->data_len);
+    c->splice = r != IDN_CHUNK_OK;
     c->pipeline_events |= chunk_result_event(r);
 }
 
@@ -449,6 +454,7 @@ static int process_message(idn_session_t *s, const idn_msg_t *m)
             s->input_events |= IDN_IEV_CCERR;
         } else if (c->route == IDN_ROUTE_LASER_CONTINUOUS) {
             c->pipeline_events |= IDN_PEV_CKTERR;
+            c->splice = true;
         }
     } else {
         process_data(s, m);

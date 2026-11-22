@@ -24,8 +24,8 @@
 
 static struct {
     int compiles, acquires, enqueues, releases, violations;
-    bool acquire_ok, release_ok, quiescent;     /* what the next calls return */
-    bool held, decoder[IDN_SESSION_CHANNELS];
+    bool acquire_ok, enqueue_ok, release_ok, quiescent;     /* what the next calls return */
+    bool held, decoder[IDN_SESSION_CHANNELS], splice;       /* splice: of the last enqueue */
     uint32_t held_gen, last_gen;
     idn_stop_reason_t last_reason;
 } g;
@@ -66,14 +66,16 @@ static bool fake_acquire(void *ctx, uint32_t gen)
     return true;
 }
 
-static idn_chunk_result_t fake_enqueue(void *ctx, uint8_t ch, uint32_t gen, const uint8_t *chunk, uint16_t len)
+static idn_chunk_result_t fake_enqueue(void *ctx, uint8_t ch, uint32_t gen, bool splice, const uint8_t *chunk,
+                                       uint16_t len)
 {
     (void)ctx;
     (void)chunk;
     (void)len;
     g.enqueues++;
+    g.splice = splice;
     if (!g.held || gen != g.held_gen || !g.decoder[ch]) g.violations++;
-    return IDN_CHUNK_OK;
+    return g.enqueue_ok ? IDN_CHUNK_OK : IDN_CHUNK_DEVICE_OVERRUN;
 }
 
 static bool fake_release(void *ctx, uint32_t gen, idn_stop_reason_t reason)
@@ -183,14 +185,16 @@ typedef struct {
     msg_t     msg;
     const uint8_t *req;         /* EV_GROUP payload */
     size_t    req_len;
-    int       acquire_ok, release_ok, quiescent;     /* EV_SET: what the fake output returns from now on */
+    int       acquire_ok, enqueue_ok, release_ok, quiescent;     /* EV_SET: what the fake output returns from now on */
 
     int result, session, state, iev, pev, status, mask, reason;   /* expected; state is the message's channel */
+    int splice;                                                   /* expected of the step's enqueue */
     int compiles, acquires, enqueues, releases;                   /* output actions caused, always checked */
 } step_t;
 
 #define DEFAULTS    .result = ANY, .session = ANY, .state = ANY, .iev = ANY, .pev = ANY, .status = ANY, \
-                    .mask = ANY, .reason = ANY, .acquire_ok = ANY, .release_ok = ANY, .quiescent = ANY
+                    .mask = ANY, .reason = ANY, .splice = ANY, .acquire_ok = ANY, .enqueue_ok = ANY, \
+                    .release_ok = ANY, .quiescent = ANY
 #define RT(...)     { .kind = EV_RT, .cmd = IDN_CMD_RT_CHANNEL_ACK, DEFAULTS, __VA_ARGS__ }
 #define TICK(...)   { .kind = EV_TICK, DEFAULTS, __VA_ARGS__ }
 #define GROUP(p, ...) { .kind = EV_GROUP, .req = (p), .req_len = sizeof(p), DEFAULTS, __VA_ARGS__ }
@@ -223,7 +227,16 @@ static const step_t s_route_then_play[] = {
     RT(.msg = WAVE(.chunk = 0x02), .state = IDLE, .pev = PEV(CKTERR)),       /* frame samples: wrong chunk type */
     RT(.msg = WAVE(.samples = 19), .state = IDLE, .pev = PEV(MCLERR)),       /* too few, before taking the output */
     RT(.msg = WAVE(), .state = PLAYING, .pev = 0, .acquires = 1, .enqueues = 1),
-    RT(.msg = WAVE(), .state = PLAYING, .enqueues = 1),
+    RT(.msg = WAVE(), .state = PLAYING, .enqueues = 1, .splice = 0),
+    RT(.msg = WAVE(.samples = 19), .state = PLAYING, .pev = PEV(MCLERR)),    /* dropped mid-stream: */
+    RT(.msg = WAVE(), .enqueues = 1, .splice = 1),                           /* the next starts with a blanked move */
+    RT(.msg = WAVE(.chunk = 0xC0), .pev = PEV(CKTERR)),                      /* a sequel fragment */
+    RT(.msg = WAVE(), .enqueues = 1, .splice = 1),
+    SET(.enqueue_ok = 0),
+    RT(.msg = WAVE(), .pev = PEV(DVIERR), .enqueues = 1),                    /* no ring room */
+    SET(.enqueue_ok = 1),
+    RT(.msg = WAVE(), .enqueues = 1, .splice = 1),
+    RT(.msg = WAVE(), .enqueues = 1, .splice = 0),
     END
 };
 
@@ -432,7 +445,7 @@ static bool run(const char *name, const step_t *steps)
     static uint8_t buf[0x10000];
 
     memset(&g, 0, sizeof(g));
-    g.acquire_ok = g.release_ok = g.quiescent = true;
+    g.acquire_ok = g.enqueue_ok = g.release_ok = g.quiescent = true;
     idn_session_init(&s, &k_ops);
     s_failed = false;
 
@@ -467,6 +480,7 @@ static bool run(const char *name, const step_t *steps)
                 break;
             case EV_SET:
                 if (st->acquire_ok != ANY) g.acquire_ok = st->acquire_ok;
+                if (st->enqueue_ok != ANY) g.enqueue_ok = st->enqueue_ok;
                 if (st->release_ok != ANY) g.release_ok = st->release_ok;
                 if (st->quiescent != ANY) g.quiescent = st->quiescent;
                 continue;
@@ -480,6 +494,7 @@ static bool run(const char *name, const step_t *steps)
         expect(name, k, "acquires", g.acquires - acquires, st->acquires);
         expect(name, k, "enqueues", g.enqueues - enqueues, st->enqueues);
         expect(name, k, "releases", g.releases - releases, st->releases);
+        expect(name, k, "blanked move into the enqueue", g.splice, st->splice);
 
         /* After every step: the contract holds, and at most one channel, the playing one, owns the output. */
         expect(name, k, "ownership violations", g.violations, 0);

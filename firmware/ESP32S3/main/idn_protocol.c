@@ -96,6 +96,7 @@ _Static_assert(IDN_DECODER_CHANNELS == RP_SAMPLE_CHANNELS, "decoder and RP chann
 #define IDN_RING_CAPACITY       8192u           /* must be power of 2 */
 #define IDN_FEED_FLUSH_US       100000LL        /* send a partial packet only after the stream idles this long */
 #define IDN_FEED_PREBUFFER      3072u           /* samples queued on the RP before START (~100 ms at 30 kpps) */
+#define IDN_SPLICE_BLANK_SAMPLES 16u            /* blanked move into a chunk queued after a dropped one; full-scale steps stay under 1/8 */
 #define IDN_MAX_CHANNELS        64
 #define STACK_SERVER            8192u
 #define STACK_FEED              4096u
@@ -201,6 +202,8 @@ typedef struct {
 static rp_sample_t       *s_ring      = NULL;
 static volatile uint32_t  s_ring_head = 0;
 static volatile uint32_t  s_ring_tail = 0;
+static rp_sample_t        s_ring_last;            /* last sample queued; valid when s_ring_has_last */
+static bool               s_ring_has_last = false;
 static uint32_t           s_applied_rate = 0;     /* rate the RP runs */
 static uint32_t           s_requested_rate = 0;   /* rate the sender's chunks imply */
 
@@ -226,6 +229,10 @@ static uint32_t ring_write(const rp_sample_t *pts, uint32_t n)
     for (uint32_t i = 0; i < n; i++)
         s_ring[(tail + i) & mask] = pts[i];
     __atomic_store_n(&s_ring_tail, (tail + n) % wrap, __ATOMIC_RELEASE);
+    if (n > 0) {
+        s_ring_last     = pts[n - 1];
+        s_ring_has_last = true;
+    }
     return n;
 }
 
@@ -242,7 +249,7 @@ static uint32_t ring_read(rp_sample_t *out, uint32_t n)
     return n;
 }
 
-static void ring_clear(void) { s_ring_head = 0; s_ring_tail = 0; }
+static void ring_clear(void) { s_ring_head = 0; s_ring_tail = 0; s_ring_has_last = false; }
 
 static const char *TAG = "idn";
 
@@ -578,9 +585,10 @@ static void handle_svcmap_req(const struct sockaddr_in *from,
 /*
    Decode a wave chunk the session has accepted for a routed channel. The
    whole chunk was validated by ops_wave_check() (header, duration, exact
-   stride, >= 20 samples); it is queued whole or not at all.
+   stride, >= 20 samples); it is queued whole or not at all. splice: the
+   channel's previous chunk was not queued.
 */
-static idn_chunk_result_t process_wave_chunk(uint8_t ch_id,
+static idn_chunk_result_t process_wave_chunk(uint8_t ch_id, bool splice,
                                              const uint8_t *data, uint16_t data_len)
 {
     idn_channel_decoder_t *ch = &s_decoders[ch_id];
@@ -599,13 +607,29 @@ static idn_chunk_result_t process_wave_chunk(uint8_t ch_id,
     uint32_t rate = (uint32_t)((uint64_t)nsamples * 1000000ULL / duration_us);
     apply_sample_rate(rate);
 
-    /* Queue the whole chunk or none of it; this task is the only producer. */
-    if (nsamples > ring_free()) {
+    /* After a chunk that was not queued, this one starts with a blanked move from the last queued point. */
+    uint32_t lead = (splice && s_ring_has_last) ? IDN_SPLICE_BLANK_SAMPLES : 0u;
+
+    /* Queue the whole chunk, with its move, or none of it; this task is the only producer. */
+    if (nsamples + lead > ring_free()) {
         protocol_stream_stats_add_dropped(PROTOCOL_STREAM_IDN, nsamples);
         return IDN_CHUNK_DEVICE_OVERRUN;
     }
 
     rp_sample_t burst[64];
+
+    if (lead > 0) {
+        rp_sample_t first, m;
+        idn_decoder_decode(&ch->layout, samples, 1, &first.ch);
+        int32_t x0 = s_ring_last.ch[0], y0 = s_ring_last.ch[1];
+        for (int c = 2; c < RP_SAMPLE_CHANNELS; c++)
+            m.ch[c] = -32768;
+        for (uint32_t k = 1; k <= lead; k++) {
+            m.ch[0] = (int16_t)(x0 + (first.ch[0] - x0) * (int32_t)k / (int32_t)lead);
+            m.ch[1] = (int16_t)(y0 + (first.ch[1] - y0) * (int32_t)k / (int32_t)lead);
+            ring_write(&m, 1);
+        }
+    }
 
     for (uint32_t s = 0; s < nsamples; ) {
         uint32_t n = nsamples - s;
@@ -729,7 +753,7 @@ static bool ops_output_acquire(void *ctx, uint32_t gen)
     return true;
 }
 
-static idn_chunk_result_t ops_wave_enqueue(void *ctx, uint8_t ch_id, uint32_t gen,
+static idn_chunk_result_t ops_wave_enqueue(void *ctx, uint8_t ch_id, uint32_t gen, bool splice,
                                            const uint8_t *data, uint16_t data_len)
 {
     (void)ctx;
@@ -737,7 +761,7 @@ static idn_chunk_result_t ops_wave_enqueue(void *ctx, uint8_t ch_id, uint32_t ge
     if (gen != s_output_gen || !s_feed_alive) {
         return IDN_CHUNK_INTERNAL;
     }
-    return process_wave_chunk(ch_id, data, data_len);
+    return process_wave_chunk(ch_id, splice, data, data_len);
 }
 
 static bool ops_output_release(void *ctx, uint32_t gen, idn_stop_reason_t reason)

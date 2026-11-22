@@ -171,8 +171,10 @@ typedef struct {
 
     /* Take the physical output for generation gen. false: unavailable. */
     bool (*output_acquire)(void *ctx, uint32_t gen);
-    /* Enqueue a checked chunk under output generation gen. */
-    idn_chunk_result_t (*wave_enqueue)(void *ctx, uint8_t channel, uint32_t gen,
+    /* Enqueue a checked chunk under output generation gen. splice: the
+       channel's previous chunk was not queued, so start with a blanked move
+       from the last queued point. */
+    idn_chunk_result_t (*wave_enqueue)(void *ctx, uint8_t channel, uint32_t gen, bool splice,
                                        const uint8_t *chunk, uint16_t chunk_len);
     /* Cancel output generation gen and wait (bounded) for the producer to
        stop. true: quiescent and released. false: deadline missed. */
@@ -218,6 +220,7 @@ typedef struct {
     uint8_t             sdm;
     uint32_t            route_gen;
     uint32_t            config_gen;
+    bool                splice;             /* a chunk was not queued: blank the move into the next one */
     uint16_t            pipeline_events;    /* latched since the last ACK */
 } idn_channel_t;
 

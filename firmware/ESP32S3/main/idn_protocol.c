@@ -797,8 +797,11 @@ static void handle_rt_packet(const struct sockaddr_in *from,
         uint16_t svc_bytes = (uint16_t)cfg->scwc * 4;
         if (svc_bytes > cursor_len) {
             /* Never shorten the declared configuration to fit; nothing on this channel decodes until a whole one arrives. */
-            if (ch_id < IDN_MAX_CHANNELS)
+            if (ch_id < IDN_MAX_CHANNELS) {
+                idn_decoder_result_t r = { IDN_DECODER_ERR_MALFORMED, IDN_DECODER_REASON_DICT_LENGTH, 0, 0 };
                 s_channels[ch_id].layout.valid = false;
+                log_decoder_reject(ch_id, &s_channels[ch_id].config_reject, "configuration", r);
+            }
             if (need_ack) send_ack(from, flags, seq, IDNACK_INVALID);
             return;
         }

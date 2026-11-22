@@ -351,12 +351,14 @@ static const step_t s_abort_and_cancel[] = {
 
 static const step_t s_connection_identity[] = {
     PLAY_CH0,
-    RT(.from = EP_A_PORT2, .msg = OPEN(), .result = RES(OCCUPIED), .session = ACTIVE),
-    RT(.from = EP_A_PORT2, .cmd = CLOSEACK, .msg = EMPTY, .result = RES(EMPTY_CLOSE), .session = ACTIVE),
-    RT(.from = EP_A_PORT2, .cmd = ABORT, .msg = EMPTY, .session = ACTIVE),
+    RT(.from = EP_A_PORT2, .msg = WAVE(), .result = RES(OCCUPIED), .session = ACTIVE),     /* data from another port */
+    RT(.from = EP_A_PORT2, .seq = 0, .msg = OPEN(.ts_jump = -1000), .result = RES(OK), .state = PLAYING,
+       .iev = IEV(NEW), .pev = 0, .starts = 1, .breaks = 1, .enqueues = 1),  /* routing from it: the sender moved */
+    RT(.cmd = CLOSEACK, .msg = EMPTY, .result = RES(EMPTY_CLOSE), .session = ACTIVE),     /* the old port is no one */
+    RT(.cmd = ABORT, .msg = EMPTY, .session = ACTIVE),
     RT(.from = EP_B, .msg = EMPTY, .result = RES(OCCUPIED)),
-    RT(.from = EP_A_OTHER_IF, .msg = EMPTY, .result = RES(OCCUPIED)),
-    RT(.msg = WAVE(), .state = PLAYING, .iev = 0, .enqueues = 1),
+    RT(.from = EP_A_OTHER_IF, .msg = OPEN(), .result = RES(OCCUPIED)),      /* another local address: not the host */
+    RT(.from = EP_A_PORT2, .msg = WAVE(), .state = PLAYING, .iev = 0, .enqueues = 1),
     END
 };
 

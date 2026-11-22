@@ -55,7 +55,8 @@
  *
  * -- Session / link ------------------------------------------------------------
  * idn_session.c owns connection, channel and route state. One session,
- * identified by client address and port. A channel plays only after Routing
+ * identified by client address and port; its host routing a channel from a
+ * new port moves it there. A channel plays only after Routing
  * with a configuration the decoder accepts; data on a closed channel is
  * refused (no auto-open). The link times out after 1 second without accepted
  * RT traffic (IDN-Hello section 7.2). Close, abort, timeout, group exclusion

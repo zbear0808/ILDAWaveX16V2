@@ -42,6 +42,11 @@ static bool endpoint_eq(const idn_endpoint_t *a, const idn_endpoint_t *b)
            a->local_addr == b->local_addr;
 }
 
+static bool same_host(const idn_endpoint_t *a, const idn_endpoint_t *b)
+{
+    return a->peer_addr == b->peer_addr && a->local_addr == b->local_addr;
+}
+
 void idn_session_init(idn_session_t *s, const idn_session_ops_t *ops)
 {
     memset(s, 0, sizeof(*s));
@@ -404,6 +409,16 @@ static void wave_epoch_break(idn_session_t *s, uint8_t ch, bool await_recovery)
     }
 }
 
+/* A new timestamp timeline: unwrapped times from before are not comparable. */
+static void end_wave_epochs(idn_session_t *s)
+{
+    for (int i = 0; i < IDN_SESSION_CHANNELS; i++) {
+        if (s->ch[i].wave.state != IDN_WAVE_IDLE) {
+            wave_epoch_break(s, (uint8_t)i, false);
+        }
+    }
+}
+
 static void process_data(idn_session_t *s, const idn_msg_t *m, uint64_t ts_us)
 {
     uint8_t ch = m->channel_id;
@@ -586,11 +601,7 @@ static bool message_in_order(idn_session_t *s, const idn_msg_t *m, uint64_t *ts_
     if (idn_chronology_before(&s->chrono, m->timestamp, ts_us)) {
         /* The sender restarted its clock: new timeline, new wave epochs. */
         s->counters.ts_resyncs++;
-        for (int i = 0; i < IDN_SESSION_CHANNELS; i++) {
-            if (s->ch[i].wave.state != IDN_WAVE_IDLE) {
-                wave_epoch_break(s, (uint8_t)i, false);
-            }
-        }
+        end_wave_epochs(s);
         return true;
     }
 
@@ -691,11 +702,18 @@ void idn_session_rt(idn_session_t *s, int64_t now_us, const idn_endpoint_t *from
             plain_result(out, IDN_RESULT_EMPTY_CLOSE);
             return;
         }
-        if (s->state != IDN_SESSION_FREE) {
+        /* The session's host routing a channel from a new source port: its
+           sender on a new socket. The connection moves there (plan 03). */
+        bool moved = s->state == IDN_SESSION_ACTIVE && has_msg && msg.has_cfg && msg.routing &&
+                     same_host(&s->peer, from);
+        if (s->state != IDN_SESSION_FREE && !moved) {
             plain_result(out, IDN_RESULT_OCCUPIED);
             return;
         }
         open_connection(s, from, now_us);
+        if (moved) {
+            end_wave_epochs(s);     /* its timestamps start a new timeline */
+        }
         out->connection_opened = true;
     }
 

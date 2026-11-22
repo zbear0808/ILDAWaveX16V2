@@ -70,7 +70,7 @@ typedef enum {
 typedef enum {
     IDN_DECODER_REASON_NONE = 0,
     IDN_DECODER_REASON_BAD_ARGUMENT,
-    IDN_DECODER_REASON_DICT_LENGTH,          /* not whole 32-bit words */
+    IDN_DECODER_REASON_DICT_LENGTH,          /* not whole 32-bit words, or longer than its message */
     IDN_DECODER_REASON_TRUNCATED_SUFFIX,
     IDN_DECODER_REASON_UNKNOWN_CATEGORY,     /* unspecified CAT/SUB combination */
     IDN_DECODER_REASON_UNKNOWN_MODIFIER,

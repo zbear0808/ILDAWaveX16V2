@@ -25,7 +25,7 @@
 /* -- Fake decoder and output ------------------------------------------------ */
 
 static struct {
-    int compiles, acquires, enqueues, releases, violations, starts, breaks;
+    int compiles, acquires, enqueues, releases, truncated, violations, starts, breaks;
     bool acquire_ok, release_ok, quiescent, full;   /* what the next calls return; full: the queue overruns */
     uint32_t limit_hz, lock_hz;                 /* scanner rate limit; rate locked for the held output */
     bool held, decoder[IDN_SESSION_CHANNELS];
@@ -48,6 +48,13 @@ static void fake_discard(void *ctx, uint8_t ch)
 {
     (void)ctx;
     g.decoder[ch] = false;
+}
+
+static void fake_truncated(void *ctx, uint8_t ch)
+{
+    (void)ctx;
+    (void)ch;
+    g.truncated++;
 }
 
 static idn_chunk_result_t fake_check(void *ctx, uint8_t ch, const uint8_t *chunk, uint16_t len, uint32_t *samples)
@@ -116,9 +123,10 @@ static void fake_wave_epoch(void *ctx, uint8_t ch, uint32_t gen, bool start)
 }
 
 static const idn_session_ops_t k_ops = {
-    .config_compile = fake_compile, .config_discard = fake_discard, .wave_check = fake_check,
-    .output_acquire = fake_acquire, .wave_enqueue = fake_enqueue, .output_release = fake_release,
-    .output_quiescent = fake_quiescent, .rate_limits = fake_rate_limits, .wave_epoch = fake_wave_epoch,
+    .config_compile = fake_compile, .config_discard = fake_discard, .config_truncated = fake_truncated,
+    .wave_check = fake_check, .output_acquire = fake_acquire, .wave_enqueue = fake_enqueue,
+    .output_release = fake_release, .output_quiescent = fake_quiescent, .rate_limits = fake_rate_limits,
+    .wave_epoch = fake_wave_epoch,
 };
 
 /* -- Messages: a Void chunk on channel 0 plus what a step adds --------------- */
@@ -224,12 +232,13 @@ typedef struct {
 
     int result, session, state, iev, pev, status, mask, reason;   /* expected; state is the message's channel */
     int starts, breaks;                                           /* wave epochs started and ended by the step */
+    int truncated;                                                /* cut-short configurations reported */
     int compiles, acquires, enqueues, releases;                   /* output actions caused, always checked */
 } step_t;
 
 #define DEFAULTS    .seq = ANY, .result = ANY, .session = ANY, .state = ANY, .iev = ANY, .pev = ANY, .status = ANY, \
-                    .mask = ANY, .reason = ANY, .starts = ANY, .breaks = ANY, .acquire_ok = ANY, .release_ok = ANY, \
-                    .quiescent = ANY, .full = ANY, .limit = ANY, .lock = ANY, .ts_start = ANY
+                    .mask = ANY, .reason = ANY, .starts = ANY, .breaks = ANY, .truncated = ANY, .acquire_ok = ANY, \
+                    .release_ok = ANY, .quiescent = ANY, .full = ANY, .limit = ANY, .lock = ANY, .ts_start = ANY
 #define RT(...)     { .kind = EV_RT, .cmd = IDN_CMD_RT_CHANNEL_ACK, DEFAULTS, __VA_ARGS__ }
 #define TICK(...)   { .kind = EV_TICK, DEFAULTS, __VA_ARGS__ }
 #define GROUP(p, ...) { .kind = EV_GROUP, .req = (p), .req_len = sizeof(p), DEFAULTS, __VA_ARGS__ }
@@ -399,7 +408,7 @@ static const step_t s_malformed[] = {
     RT(.msg = VOID(.size_delta = 1), .result = RES(INVALID), .session = FREE),     /* declared longer than sent */
     RT(.msg = WAVE(.size_delta = -8), .result = RES(INVALID), .session = FREE),    /* octets past the declared end */
     RT(.msg = VOID(.words_only = true), .result = RES(INVALID), .session = FREE),  /* nonzero SCWC without Routing */
-    RT(.msg = ROUTE(.scwc_extra = 1), .result = RES(INVALID), .session = FREE),    /* configuration cut short */
+    RT(.msg = ROUTE(.scwc_extra = 1), .result = RES(INVALID), .session = FREE, .truncated = 1),   /* cut short */
     RT(.msg = VOID(.not_channel_msg = true), .result = RES(OK), .iev = IEV(NEW) | IEV(MVERR), .pev = 0),
     RT(.now = 900000, .msg = VOID(.size_delta = 1), .result = RES(INVALID)),       /* does not refresh the link */
     TICK(.now = 1000000, .session = FREE),
@@ -408,11 +417,13 @@ static const step_t s_malformed[] = {
 
 static const step_t s_truncated_configuration[] = {
     PLAY_CH0,
-    RT(.from = EP_A_PORT2, .msg = ROUTE(.scwc_extra = 1), .result = RES(INVALID), .state = PLAYING),   /* not ours */
+    RT(.from = EP_A_PORT2, .msg = ROUTE(.scwc_extra = 1), .result = RES(INVALID), .state = PLAYING,
+       .truncated = 0),                                                      /* not ours */
     RT(.msg = ROUTE(.scwc_extra = 1), .result = RES(INVALID), .state = VOIDED, .reason = STOP(ROUTE_CHANGE),
-       .releases = 1),
+       .releases = 1, .truncated = 1),
     RT(.msg = WAVE(), .state = VOIDED, .pev = PEV(CFGERR)),
     RT(.msg = OPEN(), .state = PLAYING, .pev = PEV(CNLRTED), OPENS),
+    RT(.msg = ROUTE(.ch = 1, .scwc_extra = 1), .result = RES(INVALID), .state = CLOSED, .truncated = 1),
     END
 };
 
@@ -598,6 +609,7 @@ static bool run(const char *name, const step_t *steps)
         const step_t *st = &steps[k];
         const int compiles = g.compiles, acquires = g.acquires, enqueues = g.enqueues, releases = g.releases;
         const int starts = g.starts, breaks = g.breaks;
+        const int truncated = g.truncated;
         idn_rt_outcome_t out;
         uint8_t resp[IDN_GROUP_RESP_BYTES] = { 0 };
 
@@ -658,6 +670,7 @@ static bool run(const char *name, const step_t *steps)
         expect(name, k, "acquires", g.acquires - acquires, st->acquires);
         expect(name, k, "enqueues", g.enqueues - enqueues, st->enqueues);
         expect(name, k, "releases", g.releases - releases, st->releases);
+        expect(name, k, "cut-short configurations reported", g.truncated - truncated, st->truncated);
 
         /* After every step: the contract holds, and at most one channel, the playing one, owns the output. */
         expect(name, k, "ownership violations", g.violations, 0);

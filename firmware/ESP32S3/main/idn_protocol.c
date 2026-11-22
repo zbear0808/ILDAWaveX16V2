@@ -824,7 +824,7 @@ static void session_tick(void)
 
     idn_session_tick(&s_session, esp_timer_get_time());
 
-    if (before == IDN_SESSION_ACTIVE && s_session.state != IDN_SESSION_ACTIVE)
+    if ((before == IDN_SESSION_ACTIVE || before == IDN_SESSION_HELD) && s_session.state != before)
         ESP_LOGW(TAG, "IDN link timeout");
     if (before == IDN_SESSION_FAULTED && s_session.state == IDN_SESSION_FREE)
         ESP_LOGI(TAG, "IDN feed stopped late; session available again");

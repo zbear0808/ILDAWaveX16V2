@@ -5,7 +5,7 @@
  *
  * Order for one RT packet:
  *   1. Bounds-check the message (no state touched on failure).
- *   2. Client group, abort, connection identity / allocation.
+ *   2. Client group, Stop hold, abort, connection identity / allocation.
  *   3. Sequence hook (plan 03), then the link timeout is refreshed.
  *   4. Routing: resolve service/mode, take the exclusive route, build the
  *      decoder, store SDM. Repeated identical configuration changes nothing.
@@ -210,7 +210,7 @@ static void close_channel(idn_session_t *s, uint8_t ch, idn_stop_reason_t reason
 
 static void close_connection(idn_session_t *s, idn_stop_reason_t reason)
 {
-    if (s->state != IDN_SESSION_ACTIVE) {
+    if (s->state != IDN_SESSION_ACTIVE && s->state != IDN_SESSION_HELD) {
         return;
     }
 
@@ -488,7 +488,7 @@ void idn_session_rt(idn_session_t *s, int64_t now_us, const idn_endpoint_t *from
     out->send_ack = ack_req;
 
     /* Abort carries no payload; it is acted on whatever follows the header. */
-    idn_msg_t msg;
+    idn_msg_t msg = { 0 };
     bool has_msg = !is_abort && payload_len > 0;
     if (has_msg && !idn_session_parse_message(payload, payload_len, &msg)) {
         /*
@@ -509,6 +509,23 @@ void idn_session_rt(idn_session_t *s, int64_t now_us, const idn_endpoint_t *from
 
     if (idn_session_group_excluded(s, group)) {
         plain_result(out, IDN_RESULT_EXCLUDED);
+        return;
+    }
+
+    /*
+       A local Stop holds its sender, which was not told: its packets keep
+       the link alive and play nothing until it closes, aborts or times out.
+    */
+    if (s->state == IDN_SESSION_HELD && endpoint_eq(&s->peer, from)) {
+        s->last_rt_us = now_us;
+        if (is_close || is_abort) {
+            close_connection(s, is_abort ? IDN_STOP_ABORT : IDN_STOP_GRACEFUL);
+            out->connection_closed = true;
+        }
+        plain_result(out, IDN_RESULT_OK);
+        if (ack_req && has_msg && msg.channel_msg) {
+            out->ack.pipeline_events = IDN_PEV_CNLCLSD;
+        }
         return;
     }
 
@@ -590,7 +607,7 @@ void idn_session_rt(idn_session_t *s, int64_t now_us, const idn_endpoint_t *from
 
 void idn_session_tick(idn_session_t *s, int64_t now_us)
 {
-    if (s->state == IDN_SESSION_ACTIVE &&
+    if ((s->state == IDN_SESSION_ACTIVE || s->state == IDN_SESSION_HELD) &&
         now_us - s->last_rt_us >= IDN_SESSION_LINK_TIMEOUT_US) {
         close_connection(s, IDN_STOP_TIMEOUT);
     }
@@ -602,7 +619,15 @@ void idn_session_tick(idn_session_t *s, int64_t now_us)
 
 void idn_session_cancel(idn_session_t *s, idn_stop_reason_t reason)
 {
+    if (s->state != IDN_SESSION_ACTIVE) {
+        return;
+    }
+
+    /* Keep the sender's identity and link time for the hold (see idn_session_rt). */
+    idn_endpoint_t peer = s->peer;
     close_connection(s, reason);
+    s->peer = peer;
+    s->state = IDN_SESSION_HELD;
 }
 
 void idn_session_group_request(idn_session_t *s, const uint8_t *payload,

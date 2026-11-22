@@ -203,6 +203,7 @@ typedef struct {
 #define FREE        IDN_SESSION_FREE
 #define ACTIVE      IDN_SESSION_ACTIVE
 #define FAULTED     IDN_SESSION_FAULTED
+#define HELD        IDN_SESSION_HELD
 #define CLOSED      IDN_CHANNEL_CLOSED
 #define VOIDED      IDN_CHANNEL_VOIDED
 #define IDLE        IDN_CHANNEL_ROUTED_IDLE
@@ -305,8 +306,16 @@ static const step_t s_abort_and_cancel[] = {
     RT(.cmd = ABORT, .msg = EMPTY, .session = FREE),
     RT(.msg = WAVE(), .iev = IEV(NEW) | IEV(CCERR), .pev = PEV(CNLCLSD)),   /* a new connection: channel closed */
     PLAY_CH0,
-    CANCEL(.session = FREE, .reason = STOP(CANCEL), .releases = 1),          /* web Stop */
-    CANCEL(.session = FREE),
+    CANCEL(.session = HELD, .reason = STOP(CANCEL), .releases = 1),          /* web Stop holds the sender */
+    CANCEL(.session = HELD),
+    RT(.now = 500000, .msg = OPEN(), .result = RES(OK), .session = HELD, .state = CLOSED, .pev = PEV(CNLCLSD),
+       .status = 0),                                                         /* routed data plays nothing */
+    RT(.now = 500000, .from = EP_B, .msg = OPEN(), .result = RES(OCCUPIED), .session = HELD),
+    TICK(.now = 1499999, .session = HELD),                                   /* its packets keep the hold */
+    TICK(.now = 1500000, .session = FREE),                                   /* until it goes quiet */
+    RT(.now = 1500000, .msg = OPEN(), .iev = IEV(NEW), .state = PLAYING, OPENS),
+    CANCEL(.session = HELD, .releases = 1),
+    RT(.now = 1500000, .cmd = CLOSEACK, .msg = EMPTY, .result = RES(OK), .session = FREE),   /* or closes */
     END
 };
 

@@ -96,6 +96,7 @@ typedef enum {
     IDN_SESSION_ACTIVE,
     IDN_SESSION_CLOSING,
     IDN_SESSION_FAULTED,    /* output never confirmed quiescent; not allocatable */
+    IDN_SESSION_HELD,       /* local Stop: holds its sender, see idn_session_cancel() */
 } idn_session_state_t;
 
 typedef enum {
@@ -281,7 +282,11 @@ void idn_session_rt(idn_session_t *s, int64_t now_us, const idn_endpoint_t *from
 /* Link timeout and fault recovery; call at least every 100 ms. */
 void idn_session_tick(idn_session_t *s, int64_t now_us);
 
-/* Close the connection and its output for a local reason (user Stop). */
+/*
+   Close the connection and its output for a local reason (user Stop), then
+   hold its sender: its packets keep the link but play nothing, and other
+   senders get OCCUPIED, until it closes or its link times out.
+*/
 void idn_session_cancel(idn_session_t *s, idn_stop_reason_t reason);
 
 /*

@@ -151,7 +151,7 @@ typedef enum {
 /*
    Output and decoder actions. Required: config_compile, wave_check,
    output_acquire, wave_enqueue, output_release, output_quiescent.
-   config_discard, rt_input and wave_timeline may be NULL.
+   config_discard, config_truncated, rt_input and wave_timeline may be NULL.
 */
 typedef struct {
     void *ctx;
@@ -163,6 +163,9 @@ typedef struct {
                                        const uint8_t *cfg, uint16_t cfg_len);
     /* The channel's decoder is void; drop it. */
     void (*config_discard)(void *ctx, uint8_t channel);
+    /* A configuration for channel was cut short by the end of its message
+       and refused; report it as config_compile reports a rejection. */
+    void (*config_truncated)(void *ctx, uint8_t channel);
 
     /* Validate a wave chunk (header + samples) against the channel's decoder
        without side effects. */

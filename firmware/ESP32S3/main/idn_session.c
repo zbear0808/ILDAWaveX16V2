@@ -501,13 +501,20 @@ void idn_session_rt(idn_session_t *s, int64_t now_us, const idn_endpoint_t *from
            A configuration cut short on the live connection still means its
            sender changed or lost the channel's configuration: nothing on that
            channel decodes until a whole one arrives. The packet stays
-           malformed: no link refresh, no other processing.
+           malformed: no link refresh, no other processing. It is reported
+           like a rejected configuration for any sender whose routing would be
+           compiled: the live connection, or anyone while the session is free.
         */
-        if (msg.cfg_truncated && s->state == IDN_SESSION_ACTIVE &&
-            endpoint_eq(&s->peer, from) && !idn_session_group_excluded(s, group) &&
-            s->ch[msg.channel_id].state != IDN_CHANNEL_CLOSED) {
-            void_channel(s, msg.channel_id, IDN_VOID_CONFIG);
-            s->ch[msg.channel_id].pipeline_events |= IDN_PEV_CFGERR;
+        bool live = s->state == IDN_SESSION_ACTIVE && endpoint_eq(&s->peer, from);
+        if (msg.cfg_truncated && !idn_session_group_excluded(s, group) &&
+            (live || s->state == IDN_SESSION_FREE)) {
+            if (live && s->ch[msg.channel_id].state != IDN_CHANNEL_CLOSED) {
+                void_channel(s, msg.channel_id, IDN_VOID_CONFIG);
+                s->ch[msg.channel_id].pipeline_events |= IDN_PEV_CFGERR;
+            }
+            if (s->ops.config_truncated) {
+                s->ops.config_truncated(s->ops.ctx, msg.channel_id);
+            }
         }
         plain_result(out, IDN_RESULT_INVALID);
         return;

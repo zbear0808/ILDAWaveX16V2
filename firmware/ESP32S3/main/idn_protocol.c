@@ -706,6 +706,14 @@ static void ops_config_discard(void *ctx, uint8_t ch_id)
     memset(&s_decoders[ch_id].layout, 0, sizeof(s_decoders[ch_id].layout));
 }
 
+static void ops_config_truncated(void *ctx, uint8_t ch_id)
+{
+    (void)ctx;
+
+    idn_decoder_result_t r = { IDN_DECODER_ERR_MALFORMED, IDN_DECODER_REASON_DICT_LENGTH, 0, 0 };
+    log_decoder_reject(ch_id, &s_decoders[ch_id].config_reject, "configuration", r);
+}
+
 static idn_chunk_result_t ops_wave_check(void *ctx, uint8_t ch_id,
                                          const uint8_t *chunk, uint16_t chunk_len)
 {
@@ -794,6 +802,7 @@ static bool ops_output_quiescent(void *ctx)
 static const idn_session_ops_t s_session_ops = {
     .config_compile   = ops_config_compile,
     .config_discard   = ops_config_discard,
+    .config_truncated = ops_config_truncated,
     .wave_check       = ops_wave_check,
     .output_acquire   = ops_output_acquire,
     .wave_enqueue     = ops_wave_enqueue,
